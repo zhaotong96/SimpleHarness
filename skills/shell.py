@@ -1,3 +1,4 @@
+"""run one command in bash|python|powershell|cmd, return exit code, pwd, stdout, stderr"""
 import subprocess
 import sys
 import time
