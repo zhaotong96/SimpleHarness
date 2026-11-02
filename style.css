@@ -6,8 +6,9 @@ body { margin: 0; background: #14161a; color: #dcdcdc; font: 14px/1.6 Consolas, 
 .bot { background: #22262c; }
 .call { background: #2c2620; color: #e0b070; }
 .err { background: #3a1e1e; color: #ff9d9d; }
-details.think > summary, details.result > summary { cursor: pointer; color: #888; }
+details.think > summary, details.result > summary, details.call > summary { cursor: pointer; color: #888; }
 details.think pre { color: #8b8b8b; margin: 6px 0 0; }
+details.call pre { color: #e0b070; margin: 6px 0 0; }
 details.result pre { margin: 6px 0 0; max-height: 300px; overflow: auto; color: #9fd6a0; }
 #bar { position: fixed; left: 0; right: 0; bottom: 0; background: #1b1e23; border-top: 1px solid #2b2f36; padding: 10px 16px; display: flex; gap: 10px; align-items: flex-end; }
 #bar label { color: #888; font-size: 12px; white-space: nowrap; }

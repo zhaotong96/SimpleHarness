@@ -30,6 +30,12 @@ function fold(cls, title, body) {
   return pre;
 }
 
+// call 文本形如 "技能名 参数JSON"; 技能名来自文件名不含空格, 故按首个空格切
+function showCall(text) {
+  const i = text.indexOf(" ");
+  fold("call", "call " + (i < 0 ? text : text.slice(0, i)), i < 0 ? "" : text.slice(i + 1));
+}
+
 // 服务端每条 SSE 事件按类型落到不同的块里
 function paint(ev, st) {
   if (ev.type === "think") {
@@ -42,7 +48,7 @@ function paint(ev, st) {
   } else if (ev.type === "call") {
     st.bubble = null;
     st.think = null;
-    add("call", "call " + ev.text);
+    showCall(ev.text);
   } else if (ev.type === "result") {
     st.bubble = null;
     st.think = null;
@@ -95,7 +101,7 @@ async function run() {
 function history(m) {
   if (m.role === "user") add("me", m.content);
   else if (m.role === "tool") fold("result", "result", m.content);
-  else if (m.tool_calls) for (const c of m.tool_calls) add("call", "call " + c.function.name + " " + (c.function.arguments || "{}"));
+  else if (m.tool_calls) for (const c of m.tool_calls) showCall(c.function.name + " " + (c.function.arguments || "{}"));
   else if (m.content) add("bot", m.content);
 }
 
