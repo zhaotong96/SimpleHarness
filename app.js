@@ -6,6 +6,7 @@ const thinkBoxUI = document.getElementById("think");
 let messages = [];
 let busy = false;
 
+// 往对话区追加一个普通消息块, 返回元素本身便于继续往里加字
 function add(cls, text) {
   const el = document.createElement("div");
   el.className = cls;
@@ -15,6 +16,7 @@ function add(cls, text) {
   return el;
 }
 
+// 追加一个默认收起的块, thinking 与工具结果用它, 返回内部 pre 便于流式追加
 function fold(cls, title, body) {
   const box = document.createElement("details");
   box.className = cls;
@@ -52,6 +54,7 @@ function paint(ev, st) {
   }
 }
 
+// 发一轮对话: 把输入追加进 messages, 逐条消费服务端 SSE 事件渲染
 async function run() {
   const text = input.value.trim();
   if (!text || busy) return;
