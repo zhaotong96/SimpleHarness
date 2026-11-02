@@ -1,4 +1,10 @@
 {
+    "port": 8000,
+    "max-tokens": 1024,
+    "max-turns": 8,
+    "upstream-timeout": 900,
+    "max-output": 5120,
+    "wrap": 100,
     "llm-servers": [{
         "id": "llm1",
         "port": 8080,

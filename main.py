@@ -7,17 +7,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-PORT = 8000
-MAX_TOKENS = 1024  # 本地 27B 不设上限会生成到撑满上下文
-MAX_TURNS = 8  # 工具环圈数上限, 防模型反复调同一个技能出不来
-UP_TIMEOUT = 900  # 实测上游约 1.5 token/s, 1024 token 要十几分钟
 PAGES = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
 TYPES = {".html": "text/html", ".js": "application/javascript", ".css": "text/css"}
 
 
-# 读 config.json 挑出上游, 顺手问 /v1/models 拿 model 名, 所以 config 里不用写模型
-def upstream():
-    cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+# 读 config.json 配置, 无全局缓存以便即改即用
+def read_config():
+    return json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+
+
+# 挑出上游地址并问 /v1/models 拿 model 名, 所以 config 里不用写模型
+def upstream(cfg):
     s = next(x for x in cfg["llm-servers"] if x["id"] == cfg["default-llm"])
     base = f"http://{s['host']}:{s['port']}"
     with urllib.request.urlopen(base + "/v1/models", timeout=30) as r:
@@ -45,24 +45,26 @@ def load_skills():
 
 # 执行一次工具调用, 参数不合法或技能抛异常都把错误原文回给模型, 服务不替它猜
 def do_call(runs, call):
-    if call["name"] not in runs:
-        content = f"no tool {call['name']}"
+    fn = call.get("function") or {}
+    name = fn.get("name") or ""
+    if name not in runs:
+        content = f"no tool {name}"
     else:
         try:
-            content = str(runs[call["name"]](**json.loads(call["arguments"] or "{}")))
+            content = str(runs[name](**json.loads(fn.get("arguments") or "{}")))
         except Exception as e:
             content = f"call error {type(e).__name__} {e}"
     return {"role": "tool", "tool_call_id": call["id"], "content": content}
 
 
-# 读上游一条 SSE 流: 增量转成 think/ans 事件, tool_calls 碎片按 index 拼回完整调用
-def stream_upstream(base, model, tools, messages, thinking):
+# 读上游一条 SSE 流: 实时产出 think/ans 事件, 结束后返回累计的 tool_calls 和回答
+def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout):
     body = {"model": model, "messages": messages, "tools": tools, "temperature": 0, "stream": True,
-            "max_tokens": MAX_TOKENS, "chat_template_kwargs": {"enable_thinking": thinking}}
+            "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": thinking}}
     req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode("utf-8"),
                                  headers={"Content-Type": "application/json"})
     calls, answer = {}, []
-    with urllib.request.urlopen(req, timeout=UP_TIMEOUT) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         for raw in r:
             line = raw.decode("utf-8").strip()
             if not line.startswith("data:"):
@@ -76,53 +78,50 @@ def stream_upstream(base, model, tools, messages, thinking):
                 answer.append(d["content"])
                 yield ("ans", d["content"])
             for tc in d.get("tool_calls") or []:
-                slot = calls.setdefault(tc.get("index", 0), {"id": "", "name": "", "arguments": ""})
+                slot = calls.setdefault(tc.get("index", 0), {
+                    "id": "", "type": "function", "function": {"name": "", "arguments": ""}})
                 fn = tc.get("function") or {}
                 slot["id"] += tc.get("id") or ""
-                slot["name"] += fn.get("name") or ""
-                slot["arguments"] += fn.get("arguments") or ""
-    yield ("turn", [calls[k] for k in sorted(calls)], "".join(answer))
+                slot["function"]["name"] += fn.get("name") or ""
+                slot["function"]["arguments"] += fn.get("arguments") or ""
+    return [calls[k] for k in sorted(calls)], "".join(answer)
 
 
 # 跑一整轮: 增量持续外抛, 有工具就执行并续问, 结束时把完整 messages 交回客户端
 def round_events(messages, thinking=True):
-    base, model = upstream()
+    cfg = read_config()
+    base, model = upstream(cfg)
     tools, runs = load_skills()
-    for _ in range(MAX_TURNS):
-        calls = []
-        for ev in stream_upstream(base, model, tools, messages, thinking):
-            if ev[0] == "turn":
-                calls = ev[1]
-                if not calls:
-                    # 流式增量只发给了浏览器, 必须补记进会话, 否则模型下轮不知道自己说过什么
-                    messages.append({"role": "assistant", "content": ev[2]})
-                    yield ("done", messages)
-                    return
-                continue
-            yield ev
-        messages.append({"role": "assistant", "content": None, "tool_calls": [
-            {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}}
-            for c in calls]})
+    max_turns = cfg["max-turns"]
+    max_tokens = cfg["max-tokens"]
+    up_timeout = cfg["upstream-timeout"]
+    for _ in range(max_turns):
+        calls, answer = yield from stream_upstream(base, model, tools, messages, thinking, max_tokens, up_timeout)
+        if not calls:
+            messages.append({"role": "assistant", "content": answer})
+            yield ("done", messages)
+            return
+        messages.append({"role": "assistant", "content": None, "tool_calls": calls})
         for c in calls:
-            yield ("call", f"{c['name']} {c['arguments'] or '{}'}")
+            fn = c["function"]
+            yield ("call", f"{fn['name']} {fn['arguments'] or '{}'}")
             msg = do_call(runs, c)
             messages.append(msg)
             yield ("result", msg["content"])
-    messages.append({"role": "assistant", "content": f"turns over {MAX_TURNS}"})
+    messages.append({"role": "assistant", "content": f"turns over {max_turns}"})
     yield ("done", messages)
 
 
 class Handler(BaseHTTPRequestHandler):
     # 无会话状态: 每次 POST 只跑一轮, 全程 SSE 增量下发
     def do_POST(self):
-        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if self.path != "/chat":
+            return self.send(404, b'{"error":"no path"}')
         try:
-            payload = json.loads(body.decode("utf-8"))
+            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
             msgs = payload["messages"]
         except Exception:
             return self.send(400, b'{"error":"need messages"}')
-        if self.path != "/chat":
-            return self.send(404, b'{"error":"no path"}')
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.end_headers()
@@ -157,5 +156,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     # 只绑 127.0.0.1: 这服务能经 shell 技能执行任意命令, 暴露到局域网等于开放远程执行
-    print(f"tools={len(load_skills()[0])} model={upstream()[1]} url=http://127.0.0.1:{PORT}", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    cfg = read_config()
+    port = cfg["port"]
+    print(f"tools={len(load_skills()[0])} model={upstream(cfg)[1]} url=http://127.0.0.1:{port}", flush=True)
+    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

@@ -1,12 +1,13 @@
 """run one command in bash|python|powershell|cmd, return exit code, pwd, stdout, stderr"""
+import json
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-MAX_OUTPUT = 5120  # 单位是字符数, 不是字节
-WRAP = 100  # 落盘文件的折行列宽, 保证按行切片读得开
-AGENT = Path(__file__).resolve().parent.parent / ".agent"
+ROOT = Path(__file__).resolve().parent.parent
+CONFIG = ROOT / "config.json"
+AGENT = ROOT / ".agent"
 LOGS = AGENT / "logs"
 
 desc = {
@@ -29,6 +30,11 @@ desc = {
 }
 
 
+# 读 config.json 配置, 无全局缓存以便即改即用
+def read_config():
+    return json.loads(CONFIG.read_text(encoding="utf-8"))
+
+
 # 把 stdout / stderr 拼成分段正文, 供报告与落盘复用
 def streams(out, err):
     text = ""
@@ -37,28 +43,28 @@ def streams(out, err):
     return text
 
 
-# 逐逻辑行按 WRAP 硬折, 只插换行不改字符, 空行照留
-def fold(text):
+# 逐逻辑行按 wrap 硬折, 只插换行不改字符, 空行照留
+def fold(text, wrap):
     return "\n".join(
         piece
         for line in text.splitlines()
-        for piece in [line[i:i + WRAP] for i in range(0, len(line), WRAP)] or [""]
+        for piece in [line[i:i + wrap] for i in range(0, len(line), wrap)] or [""]
     )
 
 
 # 超限报告折行后落盘为独立文本文件, 只返回文件路径; 写不进去就回 dump fail
-def dump(report):
+def dump(report, wrap):
     # 秒 + 微秒, 同一秒内连续调用也不互相覆盖
     path = LOGS / f"{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1000000:06d}.txt"
     try:
         LOGS.mkdir(parents=True, exist_ok=True)
-        path.write_text(fold(report), encoding="utf-8")
+        path.write_text(fold(report, wrap), encoding="utf-8")
     except OSError:
         return "dump fail"
     return path.as_posix()
 
 
-# 执行一条命令并把报告回给模型: 入参先校验, 报告超 MAX_OUTPUT 时不给正文只给回读路径
+# 执行一条命令并把报告回给模型: 入参先校验, 报告超 max-output 时不给正文只给回读路径
 def run(interpreter="bash", command="", pwd=".", timeout=60):
     argv = {
         "bash": ("bash", "-lc"),
@@ -104,6 +110,7 @@ def run(interpreter="bash", command="", pwd=".", timeout=60):
     else:
         report = f"exit={p.returncode} pwd={workdir}\n" + streams(p.stdout, p.stderr)
 
-    if len(report) > MAX_OUTPUT:
-        return "output over length " + dump(report)
+    cfg = read_config()
+    if len(report) > cfg["max-output"]:
+        return "output over length " + dump(report, cfg["wrap"])
     return report
