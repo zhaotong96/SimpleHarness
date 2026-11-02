@@ -91,6 +91,26 @@ async function run() {
   sendBtn.disabled = false;
 }
 
+// 把磁盘恢复出来的一条消息画成与实时流一致的样式
+function history(m) {
+  if (m.role === "user") add("me", m.content);
+  else if (m.role === "tool") fold("result", "result", m.content);
+  else if (m.tool_calls) for (const c of m.tool_calls) add("call", "call " + c.function.name + " " + (c.function.arguments || "{}"));
+  else if (m.content) add("bot", m.content);
+}
+
+// 打开页面先要回磁盘上的对话, 刷新和 python 重启都不该丢历史
+async function restore() {
+  try {
+    messages = (await (await fetch("/conversation")).json()).messages || [];
+  } catch (e) {
+    return;
+  }
+  messages.forEach(history);
+}
+
+restore();
+
 sendBtn.onclick = run;
 input.onkeydown = (e) => {
   if (e.ctrlKey && e.key === "Enter") run();

@@ -2,11 +2,13 @@
 import importlib.util
 import inspect
 import json
+import os
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+CONVO = ROOT / ".agent" / "conversation" / "current.json"
 PAGES = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
 TYPES = {".html": "text/html", ".js": "application/javascript", ".css": "text/css"}
 
@@ -112,8 +114,24 @@ def round_events(messages, thinking=True):
     yield ("done", messages)
 
 
+# 对话落盘: 先写临时文件再原子改名, 半截 JSON 会让下次恢复直接失败
+def save_convo(messages):
+    CONVO.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CONVO.with_suffix(".tmp")
+    tmp.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, CONVO)
+
+
+# 读回磁盘上的对话, 没有就当新会话
+def load_convo():
+    return json.loads(CONVO.read_text(encoding="utf-8")) if CONVO.exists() else []
+
+
 class Handler(BaseHTTPRequestHandler):
-    # 无会话状态: 每次 POST 只跑一轮, 全程 SSE 增量下发
+    # 客户端半截断开不该打断这一轮, 所以每个事件都容错, 只记一次标志后续静默
+    dead = False
+
+    # 每次 POST 跑一轮: 全程 SSE 下发, 结束无论成败都把对话写回磁盘
     def do_POST(self):
         if self.path != "/chat":
             return self.send(404, b'{"error":"no path"}')
@@ -130,13 +148,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.emit(ev)
         except Exception as e:
             self.emit(("error", str(e)[:200]))
+        finally:
+            save_convo(msgs)
         self.emit(("end", None))
 
     # 一条 SSE 事件, 每条都 flush, 否则浏览器要等缓冲区满才见字
     def emit(self, ev):
         obj = {"type": ev[0], "text": ev[1] if len(ev) > 1 else None}
-        self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode("utf-8"))
-        self.wfile.flush()
+        try:
+            self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        except OSError:
+            self.dead = True
 
     # 定长响应统一走这里, 静态页与错误都用它
     def send(self, status, body, kind="application/json"):
@@ -146,8 +169,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # 静态只认 PAGES 里列死的三个名字, 不拼路径所以没有穿越风险
+    # 读接口: /conversation 回磁盘上的对话, 其余静态只认 PAGES 列死的名字, 不拼路径所以没有穿越风险
     def do_GET(self):
+        if self.path == "/conversation":
+            return self.send(200, json.dumps({"messages": load_convo()}, ensure_ascii=False).encode("utf-8"))
         name = PAGES.get(self.path)
         if not name:
             return self.send(404, b'{"error":"no page"}')
