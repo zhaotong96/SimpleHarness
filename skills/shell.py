@@ -1,60 +1,108 @@
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+MAX_OUTPUT = 5120  # 单位是字符数, 不是字节
+WRAP = 100  # 落盘文件的折行列宽, 保证按行切片读得开
+AGENT = Path(__file__).resolve().parent.parent / ".agent"
+LOGS = AGENT / "logs"
+
 desc = {
-    "type": {
+    "interpreter": {
         "type": "string",
         "enum": ["bash", "python", "powershell", "cmd"]
     },
-    "cmd":{
+    "command":{
         "type": "string"
     },
     "pwd": {
         "type": "string",
         "default": "."
     },
-    "required": ["type", "cmd"]
+    "timeout": {
+        "type": "integer",
+        "default": 60
+    },
+    "required": ["interpreter", "command"]
 }
 
-AGENT = Path(__file__).resolve().parent.parent / ".agent"
-MAX_CHARS = 4000
+
+# 把 stdout / stderr 拼成分段正文, 供报告与落盘复用
+def streams(out, err):
+    text = ""
+    for label, body in (("stdout", out), ("stderr", err)):
+        text += f"--- {label} ---\n{(body or '').strip()}\n"
+    return text
 
 
-def run(type="bash", cmd="", pwd="."):
+# 逐逻辑行按 WRAP 硬折, 只插换行不改字符, 空行照留
+def fold(text):
+    return "\n".join(
+        piece
+        for line in text.splitlines()
+        for piece in [line[i:i + WRAP] for i in range(0, len(line), WRAP)] or [""]
+    )
+
+
+# 超限报告折行后落盘为独立文本文件, 只返回文件路径; 写不进去就回 dump fail
+def dump(report):
+    # 秒 + 微秒, 同一秒内连续调用也不互相覆盖
+    path = LOGS / f"{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1000000:06d}.txt"
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        path.write_text(fold(report), encoding="utf-8")
+    except OSError:
+        return "dump fail"
+    return path.as_posix()
+
+
+# 执行一条命令并把报告回给模型: 入参先校验, 报告超 MAX_OUTPUT 时不给正文只给回读路径
+def run(interpreter="bash", command="", pwd=".", timeout=60):
     argv = {
         "bash": ("bash", "-lc"),
         "python": (sys.executable, "-c"),
         "powershell": ("powershell", "-NoProfile", "-Command"),
         "cmd": ("cmd", "/c"),
-    }.get(type)
+    }.get(interpreter)
     if argv is None:
-        return "错误: type 不在允许的枚举里"
+        return "bad enum"
+
+    # 兜住模型传 null / 数字 / bool, 不让 AttributeError 逃成裸栈
+    if not isinstance(command, str) or not command.strip():
+        return "empty command"
+
+    # bool 是 int 的子类, 单用 isinstance 会放行 timeout=True
+    if isinstance(timeout, bool) or not isinstance(timeout, int):
+        return "timeout must int"
+
+    # 带冒号无根的 drive-relative 写法不会替换 AGENT, 而是被拼接到它后面
+    if ":" in pwd and not (Path(pwd).drive and Path(pwd).root):
+        return "bad pwd"
 
     workdir = (AGENT / pwd).resolve()
-    if not workdir.is_relative_to(AGENT):
-        return "错误: pwd 越出了运行空间 .agent"
-    workdir.mkdir(parents=True, exist_ok=True)
+    try:
+        workdir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return f"bad pwd {e.winerror}"
 
     try:
         p = subprocess.run(
-            [*argv, cmd],
+            [*argv, command],
             cwd=str(workdir),
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=timeout,
         )
     except FileNotFoundError:
-        return f"错误: 找不到解释器 {argv[0]}"
-    except subprocess.TimeoutExpired:
-        return "错误: 执行超过 60s 被终止"
+        return f"no {argv[0]}"
+    except subprocess.TimeoutExpired as e:
+        report = f"timeout {timeout}s\n" + streams(e.stdout, e.stderr)
+    else:
+        report = f"exit={p.returncode} pwd={workdir}\n" + streams(p.stdout, p.stderr)
 
-    report = f"exit={p.returncode} pwd={workdir}\n"
-    for label, body in (("stdout", p.stdout), ("stderr", p.stderr)):
-        body = (body or "").strip()
-        if len(body) > MAX_CHARS:
-            body = body[:MAX_CHARS] + f"\n...[已截断, 原长 {len(body)} 字符]"
-        report += f"--- {label} ---\n{body}\n"
+    if len(report) > MAX_OUTPUT:
+        return "output over length " + dump(report)
     return report
