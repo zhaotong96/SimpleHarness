@@ -22,12 +22,13 @@ def convos():
     return ROOT / read_config()["conversation-dir"]
 
 
-# 挑出上游地址并问 /v1/models 拿 model 名, 所以 config 里不用写模型
+# 挑出上游地址, 并问 /v1/models 拿 model 名和上下文上限, 所以 config 里不用写这两样
 def upstream(cfg):
     s = next(x for x in cfg["llm-servers"] if x["id"] == cfg["default-llm"])
     base = f"http://{s['host']}:{s['port']}"
     with urllib.request.urlopen(base + "/v1/models", timeout=30) as r:
-        return base, json.loads(r.read().decode())["data"][0]["id"]
+        m = json.loads(r.read().decode())["data"][0]
+    return base, m["id"], m.get("meta", {}).get("n_ctx")
 
 
 # 遍历 skills/*.py 把 desc 翻成 tool schema; desc 与 run 形参不一致就直接报错
@@ -63,21 +64,29 @@ def do_call(runs, call):
     return {"role": "tool", "tool_call_id": call["id"], "content": content}
 
 
-# 读上游一条 SSE 流: 实时产出 think/ans 事件, 结束后返回累计的 tool_calls 和回答
+# 读上游一条 SSE 流: 实时产出 think/ans 事件, 结束后返回累计的 tool_calls、回答和 usage
 def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout):
     body = {"model": model, "messages": messages, "tools": tools, "temperature": 0, "stream": True,
-            "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": thinking}}
+            "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": thinking},
+            "stream_options": {"include_usage": True}}
     req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode("utf-8"),
                                  headers={"Content-Type": "application/json"})
-    calls, answer = {}, []
+    calls, answer, usage = {}, [], {}
     with urllib.request.urlopen(req, timeout=timeout) as r:
         for raw in r:
             line = raw.decode("utf-8").strip()
             if not line.startswith("data:"):
                 continue
-            if line[5:].strip() == "[DONE]":
+            data = line[5:].strip()
+            if data == "[DONE]":
                 break
-            d = json.loads(line[5:])["choices"][0].get("delta") or {}
+            frame = json.loads(data)
+            if frame.get("usage"):
+                # 带 usage 的那一帧 choices 是空数组, 必须先取它再走 delta; tok/s 在兄弟字段 timings 里
+                t = (frame.get("timings") or {}).get("predicted_per_second")
+                usage = dict(frame["usage"], tps=round(t, 2) if t else None)
+                continue
+            d = frame["choices"][0].get("delta") or {}
             if d.get("reasoning_content"):
                 yield ("think", d["reasoning_content"])
             if d.get("content"):
@@ -90,21 +99,24 @@ def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout)
                 slot["id"] += tc.get("id") or ""
                 slot["function"]["name"] += fn.get("name") or ""
                 slot["function"]["arguments"] += fn.get("arguments") or ""
-    return [calls[k] for k in sorted(calls)], "".join(answer)
+    return [calls[k] for k in sorted(calls)], "".join(answer), usage
 
 
-# 跑一整轮: 增量持续外抛, 有工具就执行并续问, 结束时把完整 messages 交回客户端
+# 跑一整轮: 增量持续外抛, 有工具就执行并续问, 结束时把用量和完整 messages 交回客户端
 def round_events(messages, thinking=True):
     cfg = read_config()
-    base, model = upstream(cfg)
+    base, model, n_ctx = upstream(cfg)
     tools, runs = load_skills()
     max_turns = cfg["max-turns"]
     max_tokens = cfg["max-tokens"]
     up_timeout = cfg["upstream-timeout"]
+    last = {}
     for _ in range(max_turns):
-        calls, answer = yield from stream_upstream(base, model, tools, messages, thinking, max_tokens, up_timeout)
+        calls, answer, usage = yield from stream_upstream(base, model, tools, messages, thinking, max_tokens, up_timeout)
+        last = usage or last
         if not calls:
             messages.append({"role": "assistant", "content": answer})
+            yield ("usage", {**last, "n_ctx": n_ctx})
             yield ("done", messages)
             return
         messages.append({"role": "assistant", "content": None, "tool_calls": calls})
@@ -115,6 +127,7 @@ def round_events(messages, thinking=True):
             messages.append(msg)
             yield ("result", msg["content"])
     messages.append({"role": "assistant", "content": f"turns over {max_turns}"})
+    yield ("usage", {**last, "n_ctx": n_ctx})
     yield ("done", messages)
 
 

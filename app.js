@@ -4,6 +4,7 @@ const sysBox = document.getElementById("sys");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
 const thinkBoxUI = document.getElementById("think");
+const usageEl = document.getElementById("usage");
 let messages = [];
 let convo = "";
 let systemPrompt = "";
@@ -46,6 +47,12 @@ function showCall(text) {
   fold("call", "call " + (i < 0 ? text : text.slice(0, i)), i < 0 ? "" : text.slice(i + 1));
 }
 
+// 把 usage 折成一行: 上下文占用 + 本次生成 / 上限 · tok/s
+function fmtUsage(u) {
+  if (u.prompt_tokens === undefined) return "";
+  return `${u.prompt_tokens}+${u.completion_tokens} / ${u.n_ctx}` + (u.tps ? ` · ${u.tps} tok/s` : "");
+}
+
 // 服务端每条 SSE 事件按类型落到不同的块里; done 回来的数组要滤掉 system, 那是发送时临时前置的
 function paint(ev, st) {
   if (ev.type === "think") {
@@ -63,6 +70,8 @@ function paint(ev, st) {
     st.bubble = null;
     st.think = null;
     fold("result", "result", ev.text);
+  } else if (ev.type === "usage") {
+    usageEl.textContent = fmtUsage(ev.text);
   } else if (ev.type === "done") {
     messages = ev.text.filter((m) => m.role !== "system");
   } else if (ev.type === "error") {

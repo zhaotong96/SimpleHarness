@@ -15,6 +15,7 @@ details.think pre { color: #8b8b8b; margin: 6px 0 0; }
 details.call pre { color: #e0b070; margin: 6px 0 0; }
 details.result pre { margin: 6px 0 0; max-height: 300px; overflow: auto; color: #9fd6a0; }
 #bar { position: fixed; left: 0; right: 0; bottom: 0; background: #1b1e23; border-top: 1px solid #2b2f36; padding: 10px 16px; display: flex; gap: 10px; align-items: flex-end; }
+#usage { color: #888; font-size: 12px; white-space: nowrap; margin-right: auto; }
 #bar label { color: #888; font-size: 12px; white-space: nowrap; }
 #input { flex: 1; background: #101215; color: #dcdcdc; border: 1px solid #2b2f36; border-radius: 6px; padding: 8px; resize: vertical; font: inherit; }
 #send { background: #2f6fb3; color: #fff; border: 0; border-radius: 6px; padding: 9px 18px; cursor: pointer; font: inherit; }
