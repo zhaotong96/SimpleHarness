@@ -1,10 +1,18 @@
-// 会话状态只有 messages 这一个数组, 每次请求全量带上, 服务端不留任何东西
+// 会话状态就是 messages 一个数组, 每次请求全量带上; 存哪个文件、叫什么名、要不要新建, 全在这里决定
 const chat = document.getElementById("chat");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
 const thinkBoxUI = document.getElementById("think");
 let messages = [];
+let convo = "";
 let busy = false;
+
+// 新对话名: 本地时间戳, 定长且字典序即时间序, 所以服务端只需按名字排序
+function newName() {
+  const d = new Date();
+  const p = (n, w) => String(n).padStart(w || 2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${p(d.getMilliseconds(), 3)}`;
+}
 
 // 往对话区追加一个普通消息块, 返回元素本身便于继续往里加字
 function add(cls, text) {
@@ -74,7 +82,7 @@ async function run() {
     const resp = await fetch("/chat", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({messages, thinking: thinkBoxUI.checked}),
+      body: JSON.stringify({messages, thinking: thinkBoxUI.checked, conversation: convo}),
     });
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -105,11 +113,26 @@ function history(m) {
   else if (m.content) add("bot", m.content);
 }
 
-// 打开页面先要回磁盘上的对话, 刷新和 python 重启都不该丢历史
+// 打开页面先要回磁盘上的对话: 列名字取最新的一个, 没有就新建; 读不到必须报错, 不能装成空对话
 async function restore() {
+  let names = [];
   try {
-    messages = (await (await fetch("/conversation")).json()).messages || [];
+    names = await (await fetch("/conversation")).json();
   } catch (e) {
+    add("err", "history list failed " + e);
+    return;
+  }
+  convo = names.length ? names[names.length - 1] : newName();
+  try {
+    const resp = await fetch("/conversation/" + convo);
+    const data = await resp.json();
+    if (!resp.ok) {
+      add("err", "conversation unreadable " + (data.error || resp.status));
+      return;
+    }
+    messages = data.messages || [];
+  } catch (e) {
+    add("err", "conversation unreadable " + e);
     return;
   }
   messages.forEach(history);

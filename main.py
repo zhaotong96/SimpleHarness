@@ -3,12 +3,14 @@ import importlib.util
 import inspect
 import json
 import os
+import re
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-CONVO = ROOT / ".agent" / "conversation" / "current.json"
+CONVOS = ROOT / ".agent" / "conversation"
 PAGES = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
 TYPES = {".html": "text/html", ".js": "application/javascript", ".css": "text/css"}
 
@@ -114,24 +116,38 @@ def round_events(messages, thinking=True):
     yield ("done", messages)
 
 
-# 对话落盘: 先写临时文件再原子改名, 半截 JSON 会让下次恢复直接失败
-def save_convo(messages):
-    CONVO.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CONVO.with_suffix(".tmp")
-    tmp.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, CONVO)
+# 对话名换成路径: 只允许文件名安全字符, 挡掉 / .. 这类穿越写法, 不合法就交 None
+def convo_path(name):
+    name = str(name or "")
+    if not re.fullmatch(r"[0-9A-Za-z._-]+", name) or ".." in name:
+        return None
+    return CONVOS / f"{name}.json"
 
 
-# 读回磁盘上的对话, 没有就当新会话
-def load_convo():
-    return json.loads(CONVO.read_text(encoding="utf-8")) if CONVO.exists() else []
+# 读一个对话块, 文件不存在返回 None; 内容坏了就抛给调用方, 不静默当空对话
+def load_blob(path):
+    return json.loads(path.read_text(encoding="utf-8")) if path and path.exists() else None
+
+
+# 写一个对话块: 唯一临时名 + 原子改名; 失败返回错误文本而不是抛出, 免得打断整轮
+def save_blob(path, messages):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        tmp.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        return f"{type(e).__name__} {e}"
+    finally:
+        tmp.unlink(missing_ok=True)
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
     # 客户端半截断开不该打断这一轮, 所以每个事件都容错, 只记一次标志后续静默
     dead = False
 
-    # 每次 POST 跑一轮: 全程 SSE 下发, 结束无论成败都把对话写回磁盘
+    # 每次 POST 跑一轮: 客户端给了对话名就在结束时写它, 没给就只回不落盘
     def do_POST(self):
         if self.path != "/chat":
             return self.send(404, b'{"error":"no path"}')
@@ -140,6 +156,10 @@ class Handler(BaseHTTPRequestHandler):
             msgs = payload["messages"]
         except Exception:
             return self.send(400, b'{"error":"need messages"}')
+        name = payload.get("conversation", "")
+        path = convo_path(name) if name else None
+        if name and not path:
+            return self.send(400, b'{"error":"bad conversation name"}')
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.end_headers()
@@ -149,7 +169,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self.emit(("error", str(e)[:200]))
         finally:
-            save_convo(msgs)
+            if path:
+                err = save_blob(path, msgs)
+                if err:
+                    self.emit(("error", f"save fail {name} {err}"[:200]))
         self.emit(("end", None))
 
     # 一条 SSE 事件, 每条都 flush, 否则浏览器要等缓冲区满才见字
@@ -169,10 +192,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # 读接口: /conversation 回磁盘上的对话, 其余静态只认 PAGES 列死的名字, 不拼路径所以没有穿越风险
+    # 读接口: /conversation 只列名字, /conversation/<name> 取一个块, 其余走静态白名单
     def do_GET(self):
         if self.path == "/conversation":
-            return self.send(200, json.dumps({"messages": load_convo()}, ensure_ascii=False).encode("utf-8"))
+            names = sorted(p.stem for p in CONVOS.glob("*.json")) if CONVOS.is_dir() else []
+            return self.send(200, json.dumps(names).encode("utf-8"))
+        if self.path.startswith("/conversation/"):
+            path = convo_path(self.path[len("/conversation/"):])
+            if not path:
+                return self.send(400, b'{"error":"bad conversation name"}')
+            try:
+                msgs = load_blob(path) or []
+            except (OSError, ValueError) as e:
+                return self.send(500, json.dumps({"error": f"conversation unreadable {str(e)[:120]}"}).encode("utf-8"))
+            return self.send(200, json.dumps({"messages": msgs}, ensure_ascii=False).encode("utf-8"))
         name = PAGES.get(self.path)
         if not name:
             return self.send(404, b'{"error":"no page"}')
