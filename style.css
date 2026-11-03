@@ -1,6 +1,10 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: #14161a; color: #dcdcdc; font: 14px/1.6 Consolas, Menlo, monospace; }
 #chat { padding: 16px 16px 90px; max-width: 860px; margin: 0 auto; }
+#sys { padding: 16px 16px 0; max-width: 860px; margin: 0 auto; }
+#sys details { display: block; margin: 8px 0; padding: 8px 12px; border-radius: 6px; background: #1c222b; white-space: pre-wrap; word-break: break-word; }
+details.system > summary { cursor: pointer; color: #888; }
+details.system pre { margin: 6px 0 0; max-height: 320px; overflow: auto; color: #9fb8d6; }
 #chat > div, #chat > details { margin: 8px 0; padding: 8px 12px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
 .me { background: #24405c; }
 .bot { background: #22262c; }

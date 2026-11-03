@@ -1,10 +1,12 @@
 // 会话状态就是 messages 一个数组, 每次请求全量带上; 存哪个文件、叫什么名、要不要新建, 全在这里决定
 const chat = document.getElementById("chat");
+const sysBox = document.getElementById("sys");
 const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
 const thinkBoxUI = document.getElementById("think");
 let messages = [];
 let convo = "";
+let systemPrompt = "";
 let busy = false;
 
 // 新对话名: 本地时间戳, 定长且字典序即时间序, 所以服务端只需按名字排序
@@ -24,8 +26,8 @@ function add(cls, text) {
   return el;
 }
 
-// 追加一个默认收起的块, thinking 与工具结果用它, 返回内部 pre 便于流式追加
-function fold(cls, title, body) {
+// 追加一个默认收起的块, thinking / 工具结果 / 系统提示用它; 返回内部 pre 便于流式追加
+function fold(cls, title, body, parent) {
   const box = document.createElement("details");
   box.className = cls;
   const sum = document.createElement("summary");
@@ -33,7 +35,7 @@ function fold(cls, title, body) {
   const pre = document.createElement("pre");
   pre.textContent = body || "";
   box.append(sum, pre);
-  chat.appendChild(box);
+  (parent || chat).appendChild(box);
   chat.scrollTop = chat.scrollHeight;
   return pre;
 }
@@ -44,7 +46,7 @@ function showCall(text) {
   fold("call", "call " + (i < 0 ? text : text.slice(0, i)), i < 0 ? "" : text.slice(i + 1));
 }
 
-// 服务端每条 SSE 事件按类型落到不同的块里
+// 服务端每条 SSE 事件按类型落到不同的块里; done 回来的数组要滤掉 system, 那是发送时临时前置的
 function paint(ev, st) {
   if (ev.type === "think") {
     if (!st.think) st.think = fold("think", "thinking", "");
@@ -62,13 +64,13 @@ function paint(ev, st) {
     st.think = null;
     fold("result", "result", ev.text);
   } else if (ev.type === "done") {
-    messages = ev.text;
+    messages = ev.text.filter((m) => m.role !== "system");
   } else if (ev.type === "error") {
     add("err", "error " + ev.text);
   }
 }
 
-// 发一轮对话: 把输入追加进 messages, 逐条消费服务端 SSE 事件渲染
+// 发一轮对话: 把输入追加进 messages, 发送时临时前置 system 消息, 逐条消费服务端 SSE 事件渲染
 async function run() {
   const text = input.value.trim();
   if (!text || busy) return;
@@ -82,7 +84,8 @@ async function run() {
     const resp = await fetch("/chat", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({messages, thinking: thinkBoxUI.checked, conversation: convo}),
+      body: JSON.stringify({messages: [{role: "system", content: systemPrompt}].concat(messages),
+                            thinking: thinkBoxUI.checked, conversation: convo}),
     });
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -130,7 +133,7 @@ async function restore() {
       add("err", "conversation unreadable " + (data.error || resp.status));
       return;
     }
-    messages = data.messages || [];
+    messages = (data.messages || []).filter((m) => m.role !== "system");
   } catch (e) {
     add("err", "conversation unreadable " + e);
     return;
@@ -138,6 +141,20 @@ async function restore() {
   messages.forEach(history);
 }
 
+// 系统提示就是 .agent/AGENTS.md 原文: 顶部折叠展示, 发送时作为首条 system 消息, 不写进对话文件
+async function showSystem() {
+  let text = "";
+  try {
+    const r = await fetch("/agents.md");
+    text = r.ok ? await r.text() : "HTTP " + r.status;
+  } catch (e) {
+    text = "fetch failed " + e;
+  }
+  systemPrompt = text.trim() || "(AGENTS.md is empty)";
+  fold("system", "system prompt · AGENTS.md", systemPrompt, sysBox);
+}
+
+showSystem();
 restore();
 
 sendBtn.onclick = run;
