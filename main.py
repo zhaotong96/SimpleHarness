@@ -10,14 +10,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-CONVOS = ROOT / ".agent" / "conversation"
-PAGES = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
-TYPES = {".html": "text/html", ".js": "application/javascript", ".css": "text/css"}
 
 
 # 读 config.json 配置, 无全局缓存以便即改即用
 def read_config():
     return json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+
+
+# 对话目录的位置来自 config, 挪地方不用改代码
+def convos():
+    return ROOT / read_config()["conversation-dir"]
 
 
 # 挑出上游地址并问 /v1/models 拿 model 名, 所以 config 里不用写模型
@@ -121,7 +123,7 @@ def convo_path(name):
     name = str(name or "")
     if not re.fullmatch(r"[0-9A-Za-z._-]+", name) or ".." in name:
         return None
-    return CONVOS / f"{name}.json"
+    return convos() / f"{name}.json"
 
 
 # 读一个对话块, 文件不存在返回 None; 内容坏了就抛给调用方, 不静默当空对话
@@ -194,8 +196,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # 读接口: /conversation 只列名字, /conversation/<name> 取一个块, 其余走静态白名单
     def do_GET(self):
+        cfg = read_config()
         if self.path == "/conversation":
-            names = sorted(p.stem for p in CONVOS.glob("*.json")) if CONVOS.is_dir() else []
+            root = convos()
+            names = sorted(p.stem for p in root.glob("*.json")) if root.is_dir() else []
             return self.send(200, json.dumps(names).encode("utf-8"))
         if self.path.startswith("/conversation/"):
             path = convo_path(self.path[len("/conversation/"):])
@@ -206,10 +210,10 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError) as e:
                 return self.send(500, json.dumps({"error": f"conversation unreadable {str(e)[:120]}"}).encode("utf-8"))
             return self.send(200, json.dumps({"messages": msgs}, ensure_ascii=False).encode("utf-8"))
-        name = PAGES.get(self.path)
+        name = cfg["pages"].get(self.path)
         if not name:
             return self.send(404, b'{"error":"no page"}')
-        self.send(200, (ROOT / name).read_bytes(), TYPES[Path(name).suffix])
+        self.send(200, (ROOT / name).read_bytes(), cfg["types"][Path(name).suffix])
 
 
 if __name__ == "__main__":

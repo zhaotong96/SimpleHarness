@@ -5,6 +5,19 @@
     "upstream-timeout": 900,
     "max-output": 5120,
     "wrap": 100,
+    "conversation-dir": ".agent/conversation",
+    "pages": {
+        "/": "index.html",
+        "/app.js": "app.js",
+        "/style.css": "style.css",
+        "/agents.md": ".agent/AGENTS.md"
+    },
+    "types": {
+        ".html": "text/html",
+        ".js": "application/javascript",
+        ".css": "text/css",
+        ".md": "text/markdown"
+    },
     "llm-servers": [{
         "id": "llm1",
         "port": 8080,
