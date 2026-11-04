@@ -1,3 +1,4 @@
 .agent/logs/
 .agent/conversation/
 __pycache__/
+MAILBOX.md
