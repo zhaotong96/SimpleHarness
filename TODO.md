@@ -11,7 +11,7 @@ Qoder 记录（截至 273ed4b）
 
 ## 待办
 
-- 三段系统提示：`system` -> 技能清单 -> `AGENTS.md` -> 正文；同时删掉 AGENTS.md 里写死技能的那句
+- 拼系统提示：`AGENTS.md` -> 技能清单 -> 正文（AGENTS.md 顶替 system 段，必须在最前）
 - 上下文达 `n_ctx` 80% 时压缩历史
 - `timeout` 上限进 config，默认 60 分钟
 - markdown 渲染（走 `createElement`/`textContent`，不用 `innerHTML`）

@@ -16,7 +16,7 @@ Agent的业务功能全部在前端实现
 目录`.agent/`下包含`conversation/`,`logs/`,`AGENTS.md`
 
 ## 系统提示
-三段, 顺序固定: `system` -> 技能清单 -> `AGENTS.md` -> 用户对话正文
+`AGENTS.md`就是system段, 排在最前: `AGENTS.md` -> 技能清单 -> 用户对话正文
 技能清单由启动时遍历`skills/`生成, 文件名即技能名, `desc`即说明
 `AGENTS.md`不写死有哪些技能
 
@@ -27,6 +27,11 @@ Agent的业务功能全部在前端实现
 上游已声明`multimodal`和`image`/`video`输入
 `messages`的content是原样透传的, 数组形式不会被`main.py`破坏
 缺的是前端入口: 图片要编码成`image_url`的content part才能进来
+
+## 上游
+`config.json`只给host/port与default-llm, 模型名启动时问`/v1/models`
+`enable_thinking`必须嵌在`chat_template_kwargs`里, 放顶层会被llama.cpp忽略
+thinking开时首字约5s; 关时不吐reasoning增量, 工具轮次期间可静默约2min
 
 ## 已定
 日志和对话不做清理
