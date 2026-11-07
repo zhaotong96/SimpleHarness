@@ -162,7 +162,7 @@ def ensure_chrome(port=9222):
         exe,
         f"--remote-debugging-port={port}",
         "--remote-allow-origins=*",
-        f"--user-data-dir={Path.home() / \'.browser-profile\'}",
+        f"--user-data-dir={Path.home() / ".browser-profile"}",
         "--no-first-run",
         "--no-default-browser-check",
         "about:blank"
