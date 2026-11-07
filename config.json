@@ -37,7 +37,7 @@
             "id": "llm2",
             "host": "https://api.openai.com/v1",
             "api-key": "",
-            "model": "deepseek-v4-flash-0731"
+            "model": "deepseek-v4.1-flash-1017"
         }
     ],
     "current-llm": "llm2"
