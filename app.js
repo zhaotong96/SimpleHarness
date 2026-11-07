@@ -172,10 +172,24 @@ async function checkout(targetId) {
   renderGraph();
 }
 
-// 渲染分支图谱节点列表: 计算泳道缩进、角色标识、路径高亮与单机检出
+// 渲染分支图谱节点列表: 计算泳道、分支着色、贝塞尔连接线与 SourceGit 风格树状图
 function renderGraph() {
   graphEl.textContent = "";
-  const nodeMap = new Map(sessionRecords.map((m) => [m.id, m]));
+  if (!sessionRecords || !sessionRecords.length) return;
+
+  const nodes = sessionRecords.filter((m) => m.role !== "system");
+  if (!nodes.length) return;
+
+  // 确保所有节点具备有效 id 与 parent
+  nodes.forEach((m, i) => {
+    if (!m.id) m.id = "m_legacy_" + i;
+    if (!m.parent && i > 0) m.parent = nodes[i - 1].id;
+  });
+
+  const nodeMap = new Map(nodes.map((m) => [m.id, m]));
+  const idToIdx = new Map(nodes.map((m, i) => [m.id, i]));
+
+  // 追踪当前检出节点的祖先链 (用于高亮活跃路径)
   const activeChainIds = new Set();
   let curr = currentId ? nodeMap.get(currentId) : null;
   while (curr) {
@@ -183,27 +197,166 @@ function renderGraph() {
     curr = curr.parent ? nodeMap.get(curr.parent) : null;
   }
 
-  const childIndexMap = new Map();
-  const parentGroups = new Map();
-  for (const m of sessionRecords) {
+  // 构建父子拓扑映射
+  const childrenMap = new Map();
+  for (const m of nodes) {
     const pid = m.parent || "root";
-    if (!parentGroups.has(pid)) parentGroups.set(pid, []);
-    childIndexMap.set(m.id, parentGroups.get(pid).length);
-    parentGroups.get(pid).push(m.id);
+    if (!childrenMap.has(pid)) childrenMap.set(pid, []);
+    childrenMap.get(pid).push(m.id);
   }
 
-  for (const m of sessionRecords) {
-    if (m.role === "system") continue;
-    const lane = Math.min(childIndexMap.get(m.id) || 0, 5);
+  // 1. 识别分支 (Branch Detection)
+  const branchOfNode = new Map();
+  let nextBranchId = 0;
+
+  for (let i = 0; i < nodes.length; i++) {
+    const m = nodes[i];
+    const pid = m.parent;
+    if (!pid || !nodeMap.has(pid)) {
+      branchOfNode.set(m.id, nextBranchId++);
+    } else {
+      const sibs = childrenMap.get(pid);
+      if (sibs && sibs[0] === m.id) {
+        branchOfNode.set(m.id, branchOfNode.get(pid));
+      } else {
+        branchOfNode.set(m.id, nextBranchId++);
+      }
+    }
+  }
+
+  // 2. 计算各分支生命周期区间 [startIdx, endIdx] (startIdx 取父节点索引以确保分叉点预先占用泳道)
+  const branchSpans = new Map();
+  for (let i = 0; i < nodes.length; i++) {
+    const m = nodes[i];
+    const bId = branchOfNode.get(m.id);
+    const pid = m.parent;
+    const pIdx = pid && idToIdx.has(pid) ? idToIdx.get(pid) : i;
+
+    if (!branchSpans.has(bId)) {
+      branchSpans.set(bId, [pIdx, i]);
+    } else {
+      branchSpans.get(bId)[1] = i;
+    }
+  }
+
+  // 3. 贪心区间着色算法分配泳道 (Lane Allocation)
+  const laneOfBranch = new Map();
+  const sortedBranches = Array.from(branchSpans.entries()).sort((a, b) => a[1][0] - b[1][0]);
+
+  for (const [bId, [start, end]] of sortedBranches) {
+    const usedLanes = new Set();
+    for (const [otherB, otherLane] of laneOfBranch.entries()) {
+      const [oStart, oEnd] = branchSpans.get(otherB);
+      if (Math.max(start, oStart) <= Math.min(end, oEnd)) {
+        usedLanes.add(otherLane);
+      }
+    }
+    let lane = 0;
+    while (usedLanes.has(lane)) lane++;
+    laneOfBranch.set(bId, lane);
+  }
+
+  // SourceGit 经典分支色盘
+  const BRANCH_COLORS = [
+    "#4a90e2", // 0: 经典蓝
+    "#50b870", // 1: 翡翠绿
+    "#f59e0b", // 2: 暖琥珀
+    "#a855f7", // 3: 紫罗兰
+    "#06b6d4", // 4: 湖蓝青
+    "#f43f5e", // 5: 珊瑚红
+    "#ec4899", // 6: 霓虹粉
+    "#14b8a6", // 7: 薄荷绿
+    "#84cc16", // 8: 鲜柠檬
+    "#eab308"  // 9: 暖金
+  ];
+
+  const ROW_H = 26;
+  const LANE_W = 16;
+  const PAD_L = 14;
+
+  let maxLane = 0;
+  for (const l of laneOfBranch.values()) {
+    if (l > maxLane) maxLane = l;
+  }
+  const svgWidth = PAD_L + (maxLane + 1) * LANE_W + 8;
+  const totalHeight = nodes.length * ROW_H;
+
+  // 4. 绘制内联 SVG 泳道图谱画布
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("class", "graph-svg-canvas");
+  svg.setAttribute("width", String(svgWidth));
+  svg.setAttribute("height", String(totalHeight));
+
+  for (let i = 0; i < nodes.length; i++) {
+    const m = nodes[i];
+    const pid = m.parent;
+    if (!pid || !idToIdx.has(pid)) continue;
+
+    const pIdx = idToIdx.get(pid);
+    const pLane = laneOfBranch.get(branchOfNode.get(pid)) || 0;
+    const cLane = laneOfBranch.get(branchOfNode.get(m.id)) || 0;
+    const bId = branchOfNode.get(m.id);
+    const color = BRANCH_COLORS[bId % BRANCH_COLORS.length];
+
+    const px = PAD_L + pLane * LANE_W;
+    const py = pIdx * ROW_H + ROW_H / 2;
+    const cx = PAD_L + cLane * LANE_W;
+    const cy = i * ROW_H + ROW_H / 2;
+
+    const isActiveEdge = activeChainIds.has(m.id) && activeChainIds.has(pid);
+    const strokeWidth = isActiveEdge ? "2.5" : "1.8";
+    const opacity = isActiveEdge ? "1" : "0.45";
+
+    const path = document.createElementNS(svgNS, "path");
+    if (px === cx) {
+      path.setAttribute("d", `M ${px} ${py} L ${cx} ${cy}`);
+    } else {
+      if (i === pIdx + 1) {
+        path.setAttribute("d", `M ${px} ${py} C ${px} ${py + 13}, ${cx} ${cy - 13}, ${cx} ${cy}`);
+      } else {
+        const yCurveEnd = py + ROW_H;
+        path.setAttribute("d", `M ${px} ${py} C ${px} ${py + 13}, ${cx} ${yCurveEnd - 10}, ${cx} ${yCurveEnd} L ${cx} ${cy}`);
+      }
+    }
+    path.setAttribute("stroke", color);
+    path.setAttribute("stroke-width", strokeWidth);
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("opacity", opacity);
+    path.setAttribute("fill", "none");
+    svg.appendChild(path);
+  }
+
+  graphEl.appendChild(svg);
+
+  // 5. 渲染各节点行
+  for (let i = 0; i < nodes.length; i++) {
+    const m = nodes[i];
     const isCurrent = m.id === currentId;
     const inPath = activeChainIds.has(m.id);
+    const bId = branchOfNode.get(m.id);
+    const lane = laneOfBranch.get(bId) || 0;
+    const color = BRANCH_COLORS[bId % BRANCH_COLORS.length];
+    const dotX = PAD_L + lane * LANE_W;
 
     const row = document.createElement("div");
     row.className = "graph-node" + (isCurrent ? " checked-out" : inPath ? " in-path" : "");
-    if (lane > 0) row.style.paddingLeft = `${lane * 14 + 6}px`;
+    row.style.height = `${ROW_H}px`;
+
+    const spacer = document.createElement("div");
+    spacer.className = "graph-spacer";
+    spacer.style.width = `${svgWidth}px`;
 
     const dot = document.createElement("span");
-    dot.className = "graph-dot " + (m.role || "user");
+    dot.className = "graph-dot";
+    dot.style.left = `${dotX - 4}px`;
+    dot.style.backgroundColor = color;
+    dot.style.color = color;
+    spacer.appendChild(dot);
+
+    const roleTag = document.createElement("span");
+    roleTag.className = "graph-role " + (m.role || "user");
+    roleTag.textContent = m.role === "user" ? "U" : m.role === "assistant" ? "A" : "T";
 
     let preview = "";
     if (typeof m.content === "string") {
@@ -219,12 +372,18 @@ function renderGraph() {
 
     const text = document.createElement("span");
     text.className = "graph-text";
-    text.textContent = (m.role === "user" ? "U: " : m.role === "assistant" ? "A: " : "T: ") + preview;
-    text.title = `ID: ${m.id}\nRole: ${m.role}\nParent: ${m.parent || "root"}\n${preview}`;
+    text.textContent = preview;
 
-    row.append(dot, text);
+    row.title = `ID: ${m.id}\nRole: ${m.role}\nBranch: ${bId} (Lane ${lane})\nParent: ${m.parent || "root"}\n${preview}`;
+
+    row.append(spacer, roleTag, text);
     row.onclick = () => checkout(m.id);
     graphEl.appendChild(row);
+  }
+
+  const checkedOutRow = graphEl.querySelector(".graph-node.checked-out");
+  if (checkedOutRow) {
+    checkedOutRow.scrollIntoView({ block: "nearest" });
   }
 }
 
