@@ -296,7 +296,8 @@ class Handler(BaseHTTPRequestHandler):
     # 定长响应统一走这里, 静态页与错误都用它
     def send(self, status, body, kind="application/json"):
         self.send_response(status)
-        self.send_header("Content-Type", f"{kind}; charset=utf-8")
+        ctype = kind if kind.startswith("image/") else f"{kind}; charset=utf-8"
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -329,6 +330,12 @@ class Handler(BaseHTTPRequestHandler):
             spath = store_file("sessions-dir", name, "jsonl")
             lines = [json.loads(l) for l in spath.read_text(encoding="utf-8").splitlines()] if spath.exists() else []
             return self.send(200, json.dumps(lines, ensure_ascii=False).encode("utf-8"))
+        if self.path.startswith("/screenshots/"):
+            filename = Path(self.path[len("/screenshots/"):]).name
+            file_path = ROOT / ".agent" / "screenshots" / filename
+            if not file_path.is_file():
+                return self.send(404, b'{"error":"not found"}')
+            return self.send(200, file_path.read_bytes(), "image/png")
         if self.path.startswith("/conversation/"):
             path = convo_path(self.path[len("/conversation/"):])
             if not path:

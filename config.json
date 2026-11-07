@@ -1,6 +1,6 @@
 {
     "port": 8000,
-    "bind-host": "127.0.0.1",
+    "bind-host": "0.0.0.0",
     "temperature": 0,
     "models-timeout": 30,
     "default-n-ctx": 32768,

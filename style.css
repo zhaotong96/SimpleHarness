@@ -64,3 +64,16 @@ details.result pre { margin: 6px 0 0; max-height: 300px; overflow: auto; color: 
 #input { flex: 1; background: #101215; color: #dcdcdc; border: 1px solid #2b2f36; border-radius: 6px; padding: 8px; resize: vertical; font: inherit; }
 #send { background: #2f6fb3; color: #fff; border: 0; border-radius: 6px; padding: 9px 18px; cursor: pointer; font: inherit; }
 #send:disabled { background: #3a3f46; cursor: default; }
+
+
+/* Tool result thumbnail */
+.tool-thumb-wrap { margin-top: 8px; display: inline-block; }
+.tool-thumb { max-width: 260px; max-height: 160px; border-radius: 6px; border: 1px solid #3c4450; background: #111418; display: block; cursor: zoom-in; object-fit: contain; transition: transform 0.15s, border-color 0.15s; }
+.tool-thumb:hover { transform: scale(1.02); border-color: #5294e2; box-shadow: 0 4px 14px rgba(0,0,0,0.6); }
+
+/* Fullscreen Lightbox */
+#lightbox { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.82); backdrop-filter: blur(4px); }
+#lightbox.hidden { display: none; }
+#lightbox img { max-width: 94vw; max-height: 94vh; object-fit: contain; border-radius: 6px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.9); border: 1px solid #3c4450; cursor: zoom-out; }
+#lightbox-close { position: absolute; top: 16px; right: 20px; background: rgba(255, 255, 255, 0.15); border: 0; color: #fff; font-size: 24px; width: 36px; height: 36px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s; }
+#lightbox-close:hover { background: rgba(255, 255, 255, 0.3); }

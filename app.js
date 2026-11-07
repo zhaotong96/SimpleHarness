@@ -1,3 +1,37 @@
+
+// 全屏图片灯箱 (Lightbox)
+const lightbox = document.createElement("div");
+lightbox.id = "lightbox";
+lightbox.className = "hidden";
+lightbox.innerHTML = `<img id="lightbox-img" alt="enlarged view"><button id="lightbox-close">&times;</button>`;
+document.body.appendChild(lightbox);
+
+const lightboxImg = lightbox.querySelector("#lightbox-img");
+const lightboxClose = lightbox.querySelector("#lightbox-close");
+
+function openLightbox(src) {
+  if (!src) return;
+  lightboxImg.src = src;
+  lightbox.classList.remove("hidden");
+}
+
+function closeLightbox() {
+  lightbox.classList.add("hidden");
+  lightboxImg.src = "";
+}
+
+lightbox.onclick = (e) => {
+  if (e.target === lightbox || e.target === lightboxClose || e.target === lightboxImg) {
+    closeLightbox();
+  }
+};
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !lightbox.classList.contains("hidden")) {
+    closeLightbox();
+  }
+});
+
 // 会话状态就是 messages 一个数组, 每次请求全量带上; 存哪个文件、叫什么名、要不要新建, 全在这里决定
 const chat = document.getElementById("chat");
 const sysBox = document.getElementById("sys");
@@ -42,6 +76,9 @@ function renderContent(el, content) {
         const img = document.createElement("img");
         img.src = part.image_url?.url || "";
         img.className = "chat-img";
+        img.style.cursor = "zoom-in";
+        img.title = "点击放大查看";
+        img.onclick = () => openLightbox(img.src);
         el.appendChild(img);
       }
     }
@@ -210,6 +247,29 @@ function fold(cls, title, body, parent) {
   const pre = document.createElement("pre");
   pre.textContent = body || "";
   box.append(sum, pre);
+
+  // 若结果包含截图路径 /screenshots/*.png，自动附带缩略图并支持点击放大
+  if (cls === "result" && body) {
+    const match = body.match(/\/screenshots\/[a-zA-Z0-9_\-\.]+\.png/);
+    if (match) {
+      box.open = true;
+      const url = match[0];
+      const thumbWrap = document.createElement("div");
+      thumbWrap.className = "tool-thumb-wrap";
+      const thumb = document.createElement("img");
+      thumb.className = "tool-thumb";
+      thumb.src = url;
+      thumb.alt = "操作截图";
+      thumb.title = "点击放大查看";
+      thumb.onclick = (e) => {
+        e.stopPropagation();
+        openLightbox(url);
+      };
+      thumbWrap.appendChild(thumb);
+      box.appendChild(thumbWrap);
+    }
+  }
+
   (parent || chat).appendChild(box);
   chat.scrollTop = chat.scrollHeight;
   return pre;
