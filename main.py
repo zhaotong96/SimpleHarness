@@ -132,10 +132,13 @@ def round_events(messages, thinking=True, server=None, model=None):
     up_timeout = cfg["upstream-timeout"]
     temp = cfg["temperature"]
     last = {}
+    prev_id = messages[-1].get("id") if messages else None
     for _ in range(max_turns):
         calls, answer, thought, usage = yield from stream_upstream(base, model, tools, messages, thinking, max_tokens, up_timeout, temp, hdrs)
         last = usage or last
-        asst = {"role": "assistant"}
+        nid = f"m_{time.time_ns()}"
+        asst = {"id": nid, "parent": prev_id, "role": "assistant"}
+        prev_id = nid
         if thought:
             asst["reasoning_content"] = thought
         if not calls:
@@ -151,9 +154,13 @@ def round_events(messages, thinking=True, server=None, model=None):
             fn = c["function"]
             yield ("call", f"{fn['name']} {fn['arguments'] or '{}'}")
             msg = do_call(runs, c)
+            tid = f"m_{time.time_ns()}"
+            msg["id"] = tid
+            msg["parent"] = prev_id
+            prev_id = tid
             messages.append(msg)
             yield ("result", msg["content"])
-    asst = {"role": "assistant", "content": f"turns over {max_turns}"}
+    asst = {"id": f"m_{time.time_ns()}", "parent": prev_id, "role": "assistant", "content": f"turns over {max_turns}"}
     if thought:
         asst["reasoning_content"] = thought
     messages.append(asst)
@@ -211,7 +218,7 @@ class Handler(BaseHTTPRequestHandler):
     # 客户端半截断开不该打断这一轮, 所以每个事件都容错, 只记一次标志后续静默
     dead = False
 
-    # 每次 POST 跑一轮或持久化配置
+    # 每次 POST 跑一轮、持久化配置或切换分支快照
     def do_POST(self):
         if self.path == "/config":
             try:
@@ -229,6 +236,20 @@ class Handler(BaseHTTPRequestHandler):
                             s["model"] = model
                             break
                 save_config(cfg)
+            return self.send(200, b'{"ok":true}')
+        if self.path.startswith("/checkout/"):
+            name = self.path[len("/checkout/"):]
+            path = convo_path(name)
+            if not path:
+                return self.send(400, b'{"error":"bad conversation name"}')
+            try:
+                payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
+                msgs = payload.get("messages", [])
+            except Exception:
+                return self.send(400, b'{"error":"need messages"}')
+            err = save_blob(path, msgs)
+            if err:
+                return self.send(500, json.dumps({"error": err}).encode("utf-8"))
             return self.send(200, b'{"ok":true}')
         if self.path != "/chat":
             return self.send(404, b'{"error":"no path"}')
@@ -301,6 +322,13 @@ class Handler(BaseHTTPRequestHandler):
             root = ROOT / cfg["conversation-dir"]
             names = sorted(p.stem for p in root.glob("*.json")) if root.is_dir() else []
             return self.send(200, json.dumps(names).encode("utf-8"))
+        if self.path.startswith("/sessions/"):
+            name = self.path[len("/sessions/"):]
+            if not convo_path(name):
+                return self.send(400, b'{"error":"bad session name"}')
+            spath = store_file("sessions-dir", name, "jsonl")
+            lines = [json.loads(l) for l in spath.read_text(encoding="utf-8").splitlines()] if spath.exists() else []
+            return self.send(200, json.dumps(lines, ensure_ascii=False).encode("utf-8"))
         if self.path.startswith("/conversation/"):
             path = convo_path(self.path[len("/conversation/"):])
             if not path:

@@ -7,6 +7,13 @@ const thinkBoxUI = document.getElementById("think");
 const usageEl = document.getElementById("usage");
 const serverEl = document.getElementById("server");
 const modelEl = document.getElementById("model");
+const previewEl = document.getElementById("preview");
+const fileInput = document.getElementById("file");
+const graphEl = document.getElementById("graph");
+const newBranchBtn = document.getElementById("new-branch-btn");
+let currentId = null;
+let sessionRecords = [];
+let stagedImages = [];
 let messages = [];
 let convo = "";
 let systemPrompt = "";
@@ -20,11 +27,175 @@ function newName() {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${p(d.getMilliseconds(), 3)}`;
 }
 
+// 渲染消息内容: 支持纯文本字符串或包含文本与 image_url 的 parts 数组
+function renderContent(el, content) {
+  if (typeof content === "string") {
+    el.textContent = content;
+  } else if (Array.isArray(content)) {
+    el.textContent = "";
+    for (const part of content) {
+      if (part.type === "text") {
+        const p = document.createElement("p");
+        p.textContent = part.text;
+        el.appendChild(p);
+      } else if (part.type === "image_url") {
+        const img = document.createElement("img");
+        img.src = part.image_url?.url || "";
+        img.className = "chat-img";
+        el.appendChild(img);
+      }
+    }
+  }
+}
+
+// 渲染待发送图片的预览缩略图列表
+function renderPreview() {
+  previewEl.textContent = "";
+  stagedImages.forEach((url, i) => {
+    const item = document.createElement("div");
+    item.className = "preview-item";
+    const img = document.createElement("img");
+    img.src = url;
+    img.className = "preview-thumb";
+    const del = document.createElement("span");
+    del.className = "preview-del";
+    del.textContent = "×";
+    del.onclick = () => {
+      stagedImages.splice(i, 1);
+      renderPreview();
+    };
+    item.append(img, del);
+    previewEl.appendChild(item);
+  });
+}
+
+// 读取图片文件转为 Base64 Data URL 并加入待发送清单
+function stageImageFile(file) {
+  if (!file || !file.type.startsWith("image/")) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    stagedImages.push(e.target.result);
+    renderPreview();
+  };
+  reader.readAsDataURL(file);
+}
+
+// 从服务端加载不可变账本流并构建分支图谱
+async function loadGraph() {
+  if (!convo) return;
+  try {
+    const resp = await fetch("/sessions/" + convo);
+    if (!resp.ok) return;
+    sessionRecords = await resp.json();
+    sessionRecords.forEach((m, i) => {
+      if (!m.id) m.id = "m_legacy_" + i;
+      if (!m.parent && i > 0) m.parent = sessionRecords[i - 1].id;
+    });
+    if (!currentId && sessionRecords.length) {
+      currentId = sessionRecords[sessionRecords.length - 1].id;
+    }
+    renderGraph();
+  } catch (e) {}
+}
+
+// 切换检出至指定历史节点, 从账本重建祖先路径并在前端重绘
+async function checkout(targetId) {
+  if (!targetId) return;
+  const nodeMap = new Map(sessionRecords.map((m) => [m.id, m]));
+  if (!nodeMap.has(targetId)) return;
+
+  const chain = [];
+  let curr = nodeMap.get(targetId);
+  while (curr) {
+    chain.unshift(curr);
+    curr = curr.parent ? nodeMap.get(curr.parent) : null;
+  }
+
+  messages = chain.filter((m) => m.role !== "system").map((m) => {
+    const copy = {...m};
+    delete copy.server;
+    delete copy.model;
+    delete copy.ts;
+    return copy;
+  });
+  currentId = targetId;
+
+  chat.textContent = "";
+  messages.forEach(history);
+  chat.scrollTop = chat.scrollHeight;
+
+  try {
+    await fetch("/checkout/" + convo, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({messages})
+    });
+  } catch (e) {}
+
+  renderGraph();
+}
+
+// 渲染分支图谱节点列表: 计算泳道缩进、角色标识、路径高亮与单机检出
+function renderGraph() {
+  graphEl.textContent = "";
+  const nodeMap = new Map(sessionRecords.map((m) => [m.id, m]));
+  const activeChainIds = new Set();
+  let curr = currentId ? nodeMap.get(currentId) : null;
+  while (curr) {
+    activeChainIds.add(curr.id);
+    curr = curr.parent ? nodeMap.get(curr.parent) : null;
+  }
+
+  const childIndexMap = new Map();
+  const parentGroups = new Map();
+  for (const m of sessionRecords) {
+    const pid = m.parent || "root";
+    if (!parentGroups.has(pid)) parentGroups.set(pid, []);
+    childIndexMap.set(m.id, parentGroups.get(pid).length);
+    parentGroups.get(pid).push(m.id);
+  }
+
+  for (const m of sessionRecords) {
+    if (m.role === "system") continue;
+    const lane = Math.min(childIndexMap.get(m.id) || 0, 5);
+    const isCurrent = m.id === currentId;
+    const inPath = activeChainIds.has(m.id);
+
+    const row = document.createElement("div");
+    row.className = "graph-node" + (isCurrent ? " checked-out" : inPath ? " in-path" : "");
+    if (lane > 0) row.style.paddingLeft = `${lane * 14 + 6}px`;
+
+    const dot = document.createElement("span");
+    dot.className = "graph-dot " + (m.role || "user");
+
+    let preview = "";
+    if (typeof m.content === "string") {
+      preview = m.content.replace(/\s+/g, " ").trim();
+    } else if (Array.isArray(m.content)) {
+      const textPart = m.content.find((p) => p.type === "text");
+      preview = (textPart ? textPart.text : "[图片]").trim();
+    } else if (m.tool_calls) {
+      preview = "call " + m.tool_calls.map((c) => c.function?.name).join(", ");
+    }
+    if (!preview) preview = m.role || "msg";
+    if (preview.length > 20) preview = preview.slice(0, 20) + "...";
+
+    const text = document.createElement("span");
+    text.className = "graph-text";
+    text.textContent = (m.role === "user" ? "U: " : m.role === "assistant" ? "A: " : "T: ") + preview;
+    text.title = `ID: ${m.id}\nRole: ${m.role}\nParent: ${m.parent || "root"}\n${preview}`;
+
+    row.append(dot, text);
+    row.onclick = () => checkout(m.id);
+    graphEl.appendChild(row);
+  }
+}
+
 // 往对话区追加一个普通消息块, 返回元素本身便于继续往里加字
-function add(cls, text) {
+function add(cls, content) {
   const el = document.createElement("div");
   el.className = cls;
-  el.textContent = text || "";
+  if (content !== undefined && content !== null) renderContent(el, content);
   chat.appendChild(el);
   chat.scrollTop = chat.scrollHeight;
   return el;
@@ -68,21 +239,170 @@ function compress(u) {
   }
 }
 
+// 行内标记渲染: 代码、加粗、斜体, 纯 DOM 操作彻底免疫 XSS
+function renderInline(parent, text) {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.startsWith("`") && part.endsWith("`") && part.length >= 2) {
+      const code = document.createElement("code");
+      code.textContent = part.slice(1, -1);
+      parent.appendChild(code);
+    } else if (part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
+      const strong = document.createElement("strong");
+      strong.textContent = part.slice(2, -2);
+      parent.appendChild(strong);
+    } else if (part.startsWith("*") && part.endsWith("*") && part.length >= 2) {
+      const em = document.createElement("em");
+      em.textContent = part.slice(1, -1);
+      parent.appendChild(em);
+    } else {
+      parent.appendChild(document.createTextNode(part));
+    }
+  }
+}
+
+// 块级 Markdown 渲染: 标题、代码块、列表、引用与段落, 全走 createElement/textContent
+function renderMarkdown(container, text) {
+  container.textContent = "";
+  const lines = text.split("\n");
+  let inCode = false, codeLang = "", codeLines = [];
+  let currentList = null;
+  let paraLines = [];
+
+  const flushPara = () => {
+    if (!paraLines.length) return;
+    const p = document.createElement("p");
+    renderInline(p, paraLines.join("\n"));
+    container.appendChild(p);
+    paraLines = [];
+  };
+
+  const flushList = () => {
+    currentList = null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (inCode) {
+      if (line.startsWith("```")) {
+        const pre = document.createElement("pre");
+        pre.className = "code-block";
+        if (codeLang) {
+          const badge = document.createElement("div");
+          badge.className = "code-lang";
+          badge.textContent = codeLang;
+          pre.appendChild(badge);
+        }
+        const code = document.createElement("code");
+        code.textContent = codeLines.join("\n");
+        pre.appendChild(code);
+        container.appendChild(pre);
+        inCode = false;
+        codeLines = [];
+        codeLang = "";
+      } else {
+        codeLines.push(line);
+      }
+      continue;
+    }
+    if (line.startsWith("```")) {
+      flushPara();
+      flushList();
+      inCode = true;
+      codeLang = line.slice(3).trim();
+      codeLines = [];
+      continue;
+    }
+    if (!line.trim()) {
+      flushPara();
+      flushList();
+      continue;
+    }
+    const hMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (hMatch) {
+      flushPara();
+      flushList();
+      const level = Math.min(5, hMatch[1].length + 2);
+      const h = document.createElement("h" + level);
+      renderInline(h, hMatch[2]);
+      container.appendChild(h);
+      continue;
+    }
+    if (line.startsWith("> ")) {
+      flushPara();
+      flushList();
+      const bq = document.createElement("blockquote");
+      renderInline(bq, line.slice(2));
+      container.appendChild(bq);
+      continue;
+    }
+    const ulMatch = line.match(/^[\*\-]\s+(.*)$/);
+    if (ulMatch) {
+      flushPara();
+      if (!currentList || currentList.tagName !== "UL") {
+        currentList = document.createElement("ul");
+        container.appendChild(currentList);
+      }
+      const li = document.createElement("li");
+      renderInline(li, ulMatch[1]);
+      currentList.appendChild(li);
+      continue;
+    }
+    const olMatch = line.match(/^(\d+)\.\s+(.*)$/);
+    if (olMatch) {
+      flushPara();
+      if (!currentList || currentList.tagName !== "OL") {
+        currentList = document.createElement("ol");
+        container.appendChild(currentList);
+      }
+      const li = document.createElement("li");
+      renderInline(li, olMatch[2]);
+      currentList.appendChild(li);
+      continue;
+    }
+    flushList();
+    paraLines.push(line);
+  }
+
+  if (inCode) {
+    const pre = document.createElement("pre");
+    pre.className = "code-block";
+    if (codeLang) {
+      const badge = document.createElement("div");
+      badge.className = "code-lang";
+      badge.textContent = codeLang;
+      pre.appendChild(badge);
+    }
+    const code = document.createElement("code");
+    code.textContent = codeLines.join("\n");
+    pre.appendChild(code);
+    container.appendChild(pre);
+  }
+  flushPara();
+}
+
 // 服务端每条 SSE 事件按类型落到不同的块里; done 回来的数组要滤掉 system, 那是发送时临时前置的
 function paint(ev, st) {
   if (ev.type === "think") {
     if (!st.think) st.think = fold("think", "thinking", "");
     st.think.textContent += ev.text;
   } else if (ev.type === "ans") {
-    if (!st.bubble) st.bubble = add("bot");
-    st.bubble.textContent += ev.text;
+    if (!st.bubble) {
+      st.bubble = add("bot");
+      st.raw = "";
+    }
+    st.raw += ev.text;
+    renderMarkdown(st.bubble, st.raw);
     chat.scrollTop = chat.scrollHeight;
   } else if (ev.type === "call") {
     st.bubble = null;
+    st.raw = "";
     st.think = null;
     showCall(ev.text);
   } else if (ev.type === "result") {
     st.bubble = null;
+    st.raw = "";
     st.think = null;
     fold("result", "result", ev.text);
   } else if (ev.type === "usage") {
@@ -90,7 +410,9 @@ function paint(ev, st) {
     usageEl.textContent = fmtUsage(ev.text);
   } else if (ev.type === "done") {
     messages = ev.text.filter((m) => m.role !== "system");
+    if (messages.length) currentId = messages[messages.length - 1].id;
     compress(lastUsage);
+    loadGraph();
   } else if (ev.type === "error") {
     add("err", "error " + ev.text);
   }
@@ -99,13 +421,29 @@ function paint(ev, st) {
 // 发一轮对话: 把输入追加进 messages, 发送时临时前置 system 消息与选中的模型
 async function run() {
   const text = input.value.trim();
-  if (!text || busy) return;
+  if ((!text && !stagedImages.length) || busy) return;
   busy = true;
   sendBtn.disabled = true;
-  messages.push({role: "user", content: text});
-  add("me", text);
+
+  let userContent = text;
+  if (stagedImages.length) {
+    const parts = [];
+    if (text) parts.push({type: "text", text});
+    for (const url of stagedImages) {
+      parts.push({type: "image_url", image_url: {url}});
+    }
+    userContent = parts;
+    stagedImages = [];
+    renderPreview();
+  }
+
+  const userMsgId = "m_" + Date.now();
+  const userMsg = {id: userMsgId, parent: currentId, role: "user", content: userContent};
+  messages.push(userMsg);
+  currentId = userMsgId;
+  add("me", userContent);
   input.value = "";
-  const st = {bubble: null, think: null};
+  const st = {bubble: null, think: null, raw: ""};
   try {
     const resp = await fetch("/chat", {
       method: "POST",
@@ -115,7 +453,9 @@ async function run() {
         thinking: thinkBoxUI.checked,
         conversation: convo,
         server: serverEl.value,
-        model: modelEl.value
+        model: modelEl.value,
+        parent_id: userMsg.parent,
+        node_id: userMsg.id
       }),
     });
     const reader = resp.body.getReader();
@@ -145,7 +485,7 @@ function history(m) {
   if (m.role === "user") add("me", m.content);
   else if (m.role === "tool") fold("result", "result", m.content);
   else if (m.tool_calls) for (const c of m.tool_calls) showCall(c.function.name + " " + (c.function.arguments || "{}"));
-  else if (m.content) add("bot", m.content);
+  else if (m.content) renderMarkdown(add("bot"), m.content);
 }
 
 // 打开页面先要回磁盘上的对话: 列名字取最新的一个, 没有就新建; 读不到必须报错, 不能装成空对话
@@ -171,6 +511,10 @@ async function restore() {
     return;
   }
   messages.forEach(history);
+  if (messages.length) {
+    currentId = messages[messages.length - 1].id || null;
+  }
+  await loadGraph();
 }
 
 // 系统提示由 AGENTS.md 与启动时遍历的技能清单拼接而成, 发送时作为首条 system 消息
@@ -266,6 +610,43 @@ modelEl.onchange = () => {
 initServers();
 showSystem();
 restore();
+
+fileInput.onchange = () => {
+  if (fileInput.files.length) {
+    stageImageFile(fileInput.files[0]);
+    fileInput.value = "";
+  }
+};
+
+input.onpaste = (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith("image/")) {
+      e.preventDefault();
+      stageImageFile(item.getAsFile());
+    }
+  }
+};
+
+input.ondragover = (e) => e.preventDefault();
+input.ondrop = (e) => {
+  e.preventDefault();
+  const files = e.dataTransfer?.files;
+  if (files && files.length) {
+    for (const f of files) stageImageFile(f);
+  }
+};
+
+newBranchBtn.onclick = () => {
+  convo = newName();
+  messages = [];
+  currentId = null;
+  sessionRecords = [];
+  chat.textContent = "";
+  graphEl.textContent = "";
+  renderGraph();
+};
 
 sendBtn.onclick = run;
 input.onkeydown = (e) => {

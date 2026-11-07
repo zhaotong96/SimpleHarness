@@ -6,15 +6,32 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div id="sys"></div>
-<div id="chat"></div>
-<div id="bar">
-  <span id="usage"></span>
-  <select id="server"></select>
-  <select id="model"></select>
-  <label><input type="checkbox" id="think" checked> thinking</label>
-  <textarea id="input" rows="2" placeholder="说点什么，Ctrl+Enter 发送"></textarea>
-  <button id="send">发送</button>
+<div id="layout">
+  <aside id="sidebar">
+    <div id="sidebar-header">
+      <span id="sidebar-title">分支图谱</span>
+      <button id="new-branch-btn" title="新建对话">+</button>
+    </div>
+    <div id="graph-container">
+      <div id="graph"></div>
+    </div>
+  </aside>
+  <main id="main">
+    <div id="sys"></div>
+    <div id="chat"></div>
+    <div id="bar">
+      <div id="preview"></div>
+      <div id="bar-controls">
+        <span id="usage"></span>
+        <select id="server"></select>
+        <select id="model"></select>
+        <label><input type="checkbox" id="think" checked> thinking</label>
+        <label id="upload-label" title="选择图片"><input type="file" id="file" accept="image/*" hidden>📎</label>
+        <textarea id="input" rows="2" placeholder="说点什么，支持直接粘贴图片，Ctrl+Enter 发送"></textarea>
+        <button id="send">发送</button>
+      </div>
+    </div>
+  </main>
 </div>
 <script src="/app.js"></script>
 </body>
