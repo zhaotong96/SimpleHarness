@@ -1,27 +1,44 @@
 {
     "port": 8000,
+    "bind-host": "127.0.0.1",
+    "temperature": 0,
+    "models-timeout": 30,
+    "default-n-ctx": 32768,
     "max-tokens": 1024,
     "max-turns": 8,
     "upstream-timeout": 900,
     "max-output": 5120,
     "wrap": 100,
+    "skills-dir": "skills",
     "conversation-dir": ".agent/conversation",
+    "sessions-dir": ".agent/sessions",
     "pages": {
         "/": "index.html",
         "/app.js": "app.js",
         "/style.css": "style.css",
-        "/agents.md": ".agent/AGENTS.md"
+        "/agents.md": ".agent/AGENTS.md",
+        "/config.json": "config.json"
     },
     "types": {
         ".html": "text/html",
         ".js": "application/javascript",
         ".css": "text/css",
-        ".md": "text/markdown"
+        ".md": "text/markdown",
+        ".json": "application/json"
     },
-    "llm-servers": [{
-        "id": "llm1",
-        "port": 8080,
-        "host": "127.0.0.1"
-    }],
-    "default-llm": "llm1"
+    "llm-servers": [
+        {
+            "id": "llm1",
+            "host": "http://127.0.0.1:8080/v1",
+            "api-key": "",
+            "model": ""
+        },
+        {
+            "id": "llm2",
+            "host": "https://api.openai.com/v1",
+            "api-key": "",
+            "model": "deepseek-v4-flash-0731"
+        }
+    ],
+    "current-llm": "llm2"
 }

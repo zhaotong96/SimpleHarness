@@ -16,8 +16,7 @@ Unix-like文件标记,禁止内存状态黑箱
 属于Agent的文件内容一律在`.agent/`下
 
 自定义村规必须在`.agent/AGENTS.md`里声明,不指望模型从报错文案反推
-改了config里的`wrap`/`max-output`要同步改`AGENTS.md`里写死的数字
+规则必须是指示（Directives）而非机制说明，严禁在规则中硬编码运行时配置数值
 
 `skills/`只放技能文件,不允许非技能的`.py`
 `skills/`里的代码必须按契约写,不按契约写崩了自负
-

@@ -67,7 +67,7 @@ def dump(report, wrap):
 # 执行一条命令并把报告回给模型: 入参先校验, 报告超 max-output 时不给正文只给回读路径
 def run(interpreter="bash", command="", pwd=".", timeout=60):
     argv = {
-        "bash": ("bash", "-lc"),
+        "bash": ("bash", "-c"),
         "python": (sys.executable, "-c"),
         "powershell": ("powershell", "-NoProfile", "-Command"),
         "cmd": ("cmd", "/c"),

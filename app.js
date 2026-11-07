@@ -5,9 +5,12 @@ const input = document.getElementById("input");
 const sendBtn = document.getElementById("send");
 const thinkBoxUI = document.getElementById("think");
 const usageEl = document.getElementById("usage");
+const serverEl = document.getElementById("server");
+const modelEl = document.getElementById("model");
 let messages = [];
 let convo = "";
 let systemPrompt = "";
+let lastUsage = null;
 let busy = false;
 
 // 新对话名: 本地时间戳, 定长且字典序即时间序, 所以服务端只需按名字排序
@@ -53,6 +56,18 @@ function fmtUsage(u) {
   return `${u.prompt_tokens}+${u.completion_tokens} / ${u.n_ctx}` + (u.tps ? ` · ${u.tps} tok/s` : "");
 }
 
+// 当用量达 n_ctx 80% 时压缩历史: 丢弃前半段, 截断点对齐至 user 消息以保证合法轮次
+function compress(u) {
+  if (!u || !u.n_ctx || (u.prompt_tokens + u.completion_tokens) < u.n_ctx * 0.8) return;
+  const mid = Math.floor(messages.length / 2);
+  const idx = messages.findIndex((m, i) => i >= mid && m.role === "user");
+  const cut = idx > 0 ? idx : messages.findIndex((m, i) => i > 0 && m.role === "user");
+  if (cut > 0) {
+    messages = messages.slice(cut);
+    add("bot", `[上下文用量已达 80%（${u.prompt_tokens}+${u.completion_tokens} / ${u.n_ctx}），已自动压缩早期历史]`);
+  }
+}
+
 // 服务端每条 SSE 事件按类型落到不同的块里; done 回来的数组要滤掉 system, 那是发送时临时前置的
 function paint(ev, st) {
   if (ev.type === "think") {
@@ -71,15 +86,17 @@ function paint(ev, st) {
     st.think = null;
     fold("result", "result", ev.text);
   } else if (ev.type === "usage") {
+    lastUsage = ev.text;
     usageEl.textContent = fmtUsage(ev.text);
   } else if (ev.type === "done") {
     messages = ev.text.filter((m) => m.role !== "system");
+    compress(lastUsage);
   } else if (ev.type === "error") {
     add("err", "error " + ev.text);
   }
 }
 
-// 发一轮对话: 把输入追加进 messages, 发送时临时前置 system 消息, 逐条消费服务端 SSE 事件渲染
+// 发一轮对话: 把输入追加进 messages, 发送时临时前置 system 消息与选中的模型
 async function run() {
   const text = input.value.trim();
   if (!text || busy) return;
@@ -93,8 +110,13 @@ async function run() {
     const resp = await fetch("/chat", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({messages: [{role: "system", content: systemPrompt}].concat(messages),
-                            thinking: thinkBoxUI.checked, conversation: convo}),
+      body: JSON.stringify({
+        messages: [{role: "system", content: systemPrompt}].concat(messages),
+        thinking: thinkBoxUI.checked,
+        conversation: convo,
+        server: serverEl.value,
+        model: modelEl.value
+      }),
     });
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -119,6 +141,7 @@ async function run() {
 
 // 把磁盘恢复出来的一条消息画成与实时流一致的样式
 function history(m) {
+  if (m.reasoning_content) fold("think", "thinking", m.reasoning_content);
   if (m.role === "user") add("me", m.content);
   else if (m.role === "tool") fold("result", "result", m.content);
   else if (m.tool_calls) for (const c of m.tool_calls) showCall(c.function.name + " " + (c.function.arguments || "{}"));
@@ -150,19 +173,97 @@ async function restore() {
   messages.forEach(history);
 }
 
-// 系统提示就是 .agent/AGENTS.md 原文: 顶部折叠展示, 发送时作为首条 system 消息, 不写进对话文件
+// 系统提示由 AGENTS.md 与启动时遍历的技能清单拼接而成, 发送时作为首条 system 消息
 async function showSystem() {
-  let text = "";
+  let text = "", skills = [];
   try {
     const r = await fetch("/agents.md");
-    text = r.ok ? await r.text() : "HTTP " + r.status;
+    text = r.ok ? await r.text() : "";
   } catch (e) {
     text = "fetch failed " + e;
   }
-  systemPrompt = text.trim() || "(AGENTS.md is empty)";
-  fold("system", "system prompt · AGENTS.md", systemPrompt, sysBox);
+  try {
+    const r = await fetch("/skills");
+    skills = r.ok ? await r.json() : [];
+  } catch (e) {}
+  const list = skills.map((s) => `- ${s.name}: ${s.description}\n  parameters: ${JSON.stringify(s.parameters)}`).join("\n");
+  const sec = list ? `\n\n## Available Skills\n${list}` : "";
+  systemPrompt = ((text.trim() || "(AGENTS.md is empty)") + sec).trim();
+  fold("system", "system prompt · AGENTS.md + skills", systemPrompt, sysBox);
 }
 
+let cfgCache = null;
+
+// 持久化当前选中的服务器与模型至 config.json
+async function saveChoice(server, model) {
+  if (!server) return;
+  try {
+    await fetch("/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({server, model: model || ""})
+    });
+  } catch (e) {}
+}
+
+// 联动拉取指定服务器下的模型列表并恢复已选模型
+async function loadModels(serverId) {
+  if (!serverId) return;
+  modelEl.innerHTML = "<option>loading...</option>";
+  try {
+    const list = await (await fetch("/models?server=" + encodeURIComponent(serverId))).json();
+    modelEl.innerHTML = "";
+    for (const m of list) {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m;
+      modelEl.appendChild(opt);
+    }
+    const s = (cfgCache?.["llm-servers"] || []).find((x) => x.id === serverId);
+    if (s && s.model && list.includes(s.model)) {
+      modelEl.value = s.model;
+    } else if (list.length) {
+      modelEl.value = list[0];
+      if (s) s.model = list[0];
+      saveChoice(serverId, list[0]);
+    }
+  } catch (e) {
+    modelEl.innerHTML = "<option value=''>load error</option>";
+  }
+}
+
+// 读取 config.json 配置并填充服务器列表, 随后联动拉取可用模型
+async function initServers() {
+  try {
+    cfgCache = await (await fetch("/config.json")).json();
+    serverEl.innerHTML = "";
+    for (const s of cfgCache["llm-servers"]) {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = s.id;
+      if (s.id === cfgCache["current-llm"]) opt.selected = true;
+      serverEl.appendChild(opt);
+    }
+    await loadModels(serverEl.value);
+  } catch (e) {
+    add("err", "read config.json failed " + e);
+  }
+}
+
+serverEl.onchange = async () => {
+  await loadModels(serverEl.value);
+  const s = (cfgCache?.["llm-servers"] || []).find((x) => x.id === serverEl.value);
+  if (s) s.model = modelEl.value;
+  saveChoice(serverEl.value, modelEl.value);
+};
+
+modelEl.onchange = () => {
+  const s = (cfgCache?.["llm-servers"] || []).find((x) => x.id === serverEl.value);
+  if (s) s.model = modelEl.value;
+  saveChoice(serverEl.value, modelEl.value);
+};
+
+initServers();
 showSystem();
 restore();
 

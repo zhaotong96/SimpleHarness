@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,29 +18,47 @@ def read_config():
     return json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
 
 
-# 对话目录的位置来自 config, 挪地方不用改代码
-def convos():
-    return ROOT / read_config()["conversation-dir"]
+# 按配置目录键定位文件, 每次从磁盘读新值并确保目录存在
+def store_file(key, name, ext):
+    p = ROOT / read_config()[key] / f"{name}.{ext}"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
-# 挑出上游地址, 并问 /v1/models 拿 model 名和上下文上限, 所以 config 里不用写这两样
-def upstream(cfg):
-    s = next(x for x in cfg["llm-servers"] if x["id"] == cfg["default-llm"])
-    base = f"http://{s['host']}:{s['port']}"
-    with urllib.request.urlopen(base + "/v1/models", timeout=30) as r:
-        m = json.loads(r.read().decode())["data"][0]
-    return base, m["id"], m.get("meta", {}).get("n_ctx")
+# 请求指定上游的 /models 列表, 返回完整原始数据
+def fetch_models(s, timeout):
+    base = s["host"].rstrip("/")
+    hdrs = {"Authorization": f"Bearer {s['api-key']}"} if s.get("api-key") else {}
+    req = urllib.request.Request(base + "/models", headers=hdrs)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())["data"]
 
 
-# 遍历 skills/*.py 把 desc 翻成 tool schema; desc 与 run 形参不一致就直接报错
+# 挑出上游节点与指定模型, 未指定模型时优先用配置的 model 或探测 /models
+def upstream(cfg, server_id=None, model_id=None):
+    sid = server_id or cfg["current-llm"]
+    s = next(x for x in cfg["llm-servers"] if x["id"] == sid)
+    base = s["host"].rstrip("/")
+    hdrs = {"Authorization": f"Bearer {s['api-key']}"} if s.get("api-key") else {}
+    if model_id or s.get("model"):
+        model = model_id or s["model"]
+        n_ctx = s.get("n-ctx") or cfg.get("default-n-ctx")
+    else:
+        m = fetch_models(s, cfg["models-timeout"])[0]
+        model = m["id"]
+        n_ctx = m.get("meta", {}).get("n_ctx") or s.get("n-ctx") or cfg.get("default-n-ctx")
+    return base, model, n_ctx, hdrs
+
+
+# 遍历 skills 目录把 desc 翻成 tool schema; desc 与 run 形参不一致就直接报错
 def load_skills():
     tools, runs = [], {}
-    for f in sorted((ROOT / "skills").glob("*.py")):
+    sdir = ROOT / read_config()["skills-dir"]
+    for f in sorted(sdir.glob("*.py")):
         spec = importlib.util.spec_from_file_location(f.stem, f)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         props = {k: v for k, v in mod.desc.items() if k != "required"}
-        # 不一致时模型照 desc 传参会撞 TypeError, 所以宁可启动就崩
         params = set(inspect.signature(mod.run).parameters)
         if set(props) != params:
             raise RuntimeError(f"{f.name}: desc {sorted(props)} != run {sorted(params)}")
@@ -64,14 +83,15 @@ def do_call(runs, call):
     return {"role": "tool", "tool_call_id": call["id"], "content": content}
 
 
-# 读上游一条 SSE 流: 实时产出 think/ans 事件, 结束后返回累计的 tool_calls、回答和 usage
-def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout):
-    body = {"model": model, "messages": messages, "tools": tools, "temperature": 0, "stream": True,
+# 读上游一条 SSE 流: 实时产出 think/ans 事件, 结束后返回累计的 tool_calls、回答、思考和 usage
+def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout, temp, headers):
+    body = {"model": model, "messages": messages, "tools": tools, "temperature": temp, "stream": True,
             "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": thinking},
             "stream_options": {"include_usage": True}}
-    req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
-    calls, answer, usage = {}, [], {}
+    req_headers = {"Content-Type": "application/json", **headers}
+    req = urllib.request.Request(base + "/chat/completions", data=json.dumps(body).encode("utf-8"),
+                                 headers=req_headers)
+    calls, answer, thought, usage = {}, [], [], {}
     with urllib.request.urlopen(req, timeout=timeout) as r:
         for raw in r:
             line = raw.decode("utf-8").strip()
@@ -82,12 +102,12 @@ def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout)
                 break
             frame = json.loads(data)
             if frame.get("usage"):
-                # 带 usage 的那一帧 choices 是空数组, 必须先取它再走 delta; tok/s 在兄弟字段 timings 里
                 t = (frame.get("timings") or {}).get("predicted_per_second")
                 usage = dict(frame["usage"], tps=round(t, 2) if t else None)
                 continue
             d = frame["choices"][0].get("delta") or {}
             if d.get("reasoning_content"):
+                thought.append(d["reasoning_content"])
                 yield ("think", d["reasoning_content"])
             if d.get("content"):
                 answer.append(d["content"])
@@ -99,34 +119,44 @@ def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout)
                 slot["id"] += tc.get("id") or ""
                 slot["function"]["name"] += fn.get("name") or ""
                 slot["function"]["arguments"] += fn.get("arguments") or ""
-    return [calls[k] for k in sorted(calls)], "".join(answer), usage
+    return [calls[k] for k in sorted(calls)], "".join(answer), "".join(thought), usage
 
 
 # 跑一整轮: 增量持续外抛, 有工具就执行并续问, 结束时把用量和完整 messages 交回客户端
-def round_events(messages, thinking=True):
+def round_events(messages, thinking=True, server=None, model=None):
     cfg = read_config()
-    base, model, n_ctx = upstream(cfg)
+    base, model, n_ctx, hdrs = upstream(cfg, server, model)
     tools, runs = load_skills()
     max_turns = cfg["max-turns"]
     max_tokens = cfg["max-tokens"]
     up_timeout = cfg["upstream-timeout"]
+    temp = cfg["temperature"]
     last = {}
     for _ in range(max_turns):
-        calls, answer, usage = yield from stream_upstream(base, model, tools, messages, thinking, max_tokens, up_timeout)
+        calls, answer, thought, usage = yield from stream_upstream(base, model, tools, messages, thinking, max_tokens, up_timeout, temp, hdrs)
         last = usage or last
+        asst = {"role": "assistant"}
+        if thought:
+            asst["reasoning_content"] = thought
         if not calls:
-            messages.append({"role": "assistant", "content": answer})
+            asst["content"] = answer
+            messages.append(asst)
             yield ("usage", {**last, "n_ctx": n_ctx})
             yield ("done", messages)
             return
-        messages.append({"role": "assistant", "content": None, "tool_calls": calls})
+        asst["content"] = None
+        asst["tool_calls"] = calls
+        messages.append(asst)
         for c in calls:
             fn = c["function"]
             yield ("call", f"{fn['name']} {fn['arguments'] or '{}'}")
             msg = do_call(runs, c)
             messages.append(msg)
             yield ("result", msg["content"])
-    messages.append({"role": "assistant", "content": f"turns over {max_turns}"})
+    asst = {"role": "assistant", "content": f"turns over {max_turns}"}
+    if thought:
+        asst["reasoning_content"] = thought
+    messages.append(asst)
     yield ("usage", {**last, "n_ctx": n_ctx})
     yield ("done", messages)
 
@@ -136,7 +166,7 @@ def convo_path(name):
     name = str(name or "")
     if not re.fullmatch(r"[0-9A-Za-z._-]+", name) or ".." in name:
         return None
-    return convos() / f"{name}.json"
+    return store_file("conversation-dir", name, "json")
 
 
 # 读一个对话块, 文件不存在返回 None; 内容坏了就抛给调用方, 不静默当空对话
@@ -146,8 +176,7 @@ def load_blob(path):
 
 # 写一个对话块: 唯一临时名 + 原子改名; 失败返回错误文本而不是抛出, 免得打断整轮
 def save_blob(path, messages):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.stem}.{os.getpid()}.{time.time_ns()}.tmp")
+    tmp = path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
     try:
         tmp.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
@@ -158,12 +187,49 @@ def save_blob(path, messages):
     return None
 
 
+# 写配置: 原子替换写回 config.json; 保持缩进格式
+def save_config(cfg):
+    path = ROOT / "config.json"
+    tmp = path.with_suffix(f".{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# 追加账本: 把本轮新增消息逐条写进 .agent/sessions/<name>.jsonl 并打标模型
+def append_session(name, new_msgs, server, model):
+    path = store_file("sessions-dir", name, "jsonl")
+    now = time.time_ns() // 1_000_000
+    with open(path, "a", encoding="utf-8") as f:
+        for m in new_msgs:
+            f.write(json.dumps({**m, "server": server, "model": model, "ts": now}, ensure_ascii=False) + "\n")
+
+
 class Handler(BaseHTTPRequestHandler):
     # 客户端半截断开不该打断这一轮, 所以每个事件都容错, 只记一次标志后续静默
     dead = False
 
-    # 每次 POST 跑一轮: 客户端给了对话名就在结束时写它, 没给就只回不落盘
+    # 每次 POST 跑一轮或持久化配置
     def do_POST(self):
+        if self.path == "/config":
+            try:
+                payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8"))
+            except Exception:
+                return self.send(400, b'{"error":"bad json"}')
+            cfg = read_config()
+            server = payload.get("server")
+            model = payload.get("model")
+            if server:
+                cfg["current-llm"] = server
+                if model:
+                    for s in cfg["llm-servers"]:
+                        if s["id"] == server:
+                            s["model"] = model
+                            break
+                save_config(cfg)
+            return self.send(200, b'{"ok":true}')
         if self.path != "/chat":
             return self.send(404, b'{"error":"no path"}')
         try:
@@ -175,11 +241,16 @@ class Handler(BaseHTTPRequestHandler):
         path = convo_path(name) if name else None
         if name and not path:
             return self.send(400, b'{"error":"bad conversation name"}')
+        cfg = read_config()
+        server = payload.get("server") or cfg["current-llm"]
+        model = payload.get("model") or ""
+        print(f"chat: server={server} model={model or '(auto)'} convo={name}", flush=True)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.end_headers()
+        in_len = len(msgs)
         try:
-            for ev in round_events(msgs, payload.get("thinking", True)):
+            for ev in round_events(msgs, payload.get("thinking", True), server, model):
                 self.emit(ev)
         except Exception as e:
             self.emit(("error", str(e)[:200]))
@@ -188,6 +259,8 @@ class Handler(BaseHTTPRequestHandler):
                 err = save_blob(path, msgs)
                 if err:
                     self.emit(("error", f"save fail {name} {err}"[:200]))
+                if in_len > 1 and len(msgs) >= in_len:
+                    append_session(name, msgs[in_len - 1:], server, model)
         self.emit(("end", None))
 
     # 一条 SSE 事件, 每条都 flush, 否则浏览器要等缓冲区满才见字
@@ -207,11 +280,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # 读接口: /conversation 只列名字, /conversation/<name> 取一个块, 其余走静态白名单
+    # 读接口: 动态 API 优先分发, 其余走静态白名单
     def do_GET(self):
         cfg = read_config()
+        if self.path.startswith("/models"):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            sid = query.get("server", [cfg["current-llm"]])[0]
+            s = next((x for x in cfg["llm-servers"] if x["id"] == sid), None)
+            if not s:
+                return self.send(404, b'{"error":"no server"}')
+            try:
+                models = [m["id"] for m in fetch_models(s, cfg["models-timeout"])]
+                return self.send(200, json.dumps(models, ensure_ascii=False).encode("utf-8"))
+            except Exception as e:
+                return self.send(500, json.dumps({"error": str(e)[:120]}).encode("utf-8"))
+        if self.path == "/skills":
+            tools, _ = load_skills()
+            return self.send(200, json.dumps([t["function"] for t in tools], ensure_ascii=False).encode("utf-8"))
         if self.path == "/conversation":
-            root = convos()
+            root = ROOT / cfg["conversation-dir"]
             names = sorted(p.stem for p in root.glob("*.json")) if root.is_dir() else []
             return self.send(200, json.dumps(names).encode("utf-8"))
         if self.path.startswith("/conversation/"):
@@ -230,8 +317,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    # 只绑 127.0.0.1: 这服务能经 shell 技能执行任意命令, 暴露到局域网等于开放远程执行
+    # 绑定配置 IP: 这服务能经 shell 技能执行任意命令, 暴露到局域网等于开放远程执行
     cfg = read_config()
-    port = cfg["port"]
-    print(f"tools={len(load_skills()[0])} model={upstream(cfg)[1]} url=http://127.0.0.1:{port}", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    host, port = cfg["bind-host"], cfg["port"]
+    print(f"tools={len(load_skills()[0])} model={upstream(cfg)[1]} url=http://{host}:{port}", flush=True)
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
