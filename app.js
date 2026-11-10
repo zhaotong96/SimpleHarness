@@ -48,11 +48,35 @@ const newBranchBtn = document.getElementById("new-branch-btn");
 let currentId = null;
 let sessionRecords = [];
 let stagedImages = [];
+let stagedFiles = [];
 let messages = [];
 let convo = "";
 let systemPrompt = "";
 let lastUsage = null;
 let busy = false;
+
+// 常用文本文件后缀与 Markdown 语言标识映射
+function getCodeLang(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  const map = {
+    js: "javascript", mjs: "javascript", cjs: "javascript",
+    ts: "typescript", tsx: "typescript", jsx: "javascript",
+    py: "python", md: "markdown", json: "json",
+    html: "html", htm: "html", css: "css", scss: "css",
+    sh: "bash", bash: "bash", zsh: "bash", ps1: "powershell",
+    yml: "yaml", yaml: "yaml", toml: "toml", xml: "xml",
+    c: "c", h: "c", cpp: "cpp", hpp: "cpp", rs: "rust", go: "go",
+    java: "java", sql: "sql", log: "text", txt: "text", bat: "cmd"
+  };
+  return map[ext] || ext || "text";
+}
+
+// 格式化文件字节尺寸
+function fmtSize(bytes) {
+  if (bytes < 1024) return bytes + "B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + "KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + "MB";
+}
 
 // 新对话名: 本地时间戳, 定长且字典序即时间序, 所以服务端只需按名字排序
 function newName() {
@@ -85,7 +109,7 @@ function renderContent(el, content) {
   }
 }
 
-// 渲染待发送图片的预览缩略图列表
+// 渲染待发送附件的预览列表 (缩略图与文本文件标签)
 function renderPreview() {
   previewEl.textContent = "";
   stagedImages.forEach((url, i) => {
@@ -104,17 +128,56 @@ function renderPreview() {
     item.append(img, del);
     previewEl.appendChild(item);
   });
+  stagedFiles.forEach((f, i) => {
+    const item = document.createElement("div");
+    item.className = "preview-file";
+    const icon = document.createElement("span");
+    icon.className = "preview-file-icon";
+    icon.textContent = "📄";
+    const info = document.createElement("span");
+    info.className = "preview-file-name";
+    info.title = `${f.name} (${fmtSize(f.size)})`;
+    info.textContent = `${f.name} (${fmtSize(f.size)})`;
+    const del = document.createElement("span");
+    del.className = "preview-del";
+    del.textContent = "×";
+    del.onclick = () => {
+      stagedFiles.splice(i, 1);
+      renderPreview();
+    };
+    item.append(icon, info, del);
+    previewEl.appendChild(item);
+  });
 }
 
-// 读取图片文件转为 Base64 Data URL 并加入待发送清单
-function stageImageFile(file) {
-  if (!file || !file.type.startsWith("image/")) return;
+// 读取并暂存文本或图片文件
+function stageFile(file) {
+  if (!file) return;
+  if (file.type.startsWith("image/")) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      stagedImages.push(e.target.result);
+      renderPreview();
+    };
+    reader.readAsDataURL(file);
+    return;
+  }
   const reader = new FileReader();
   reader.onload = (e) => {
-    stagedImages.push(e.target.result);
+    stagedFiles.push({
+      name: file.name,
+      size: file.size,
+      text: e.target.result,
+      lang: getCodeLang(file.name)
+    });
     renderPreview();
   };
-  reader.readAsDataURL(file);
+  reader.readAsText(file, "utf-8");
+}
+
+// 读取图片文件转为 Base64 Data URL (兼容别名)
+function stageImageFile(file) {
+  stageFile(file);
 }
 
 // 从服务端加载不可变账本流并构建分支图谱
@@ -640,21 +703,28 @@ function paint(ev, st) {
 // 发一轮对话: 把输入追加进 messages, 发送时临时前置 system 消息与选中的模型
 async function run() {
   const text = input.value.trim();
-  if ((!text && !stagedImages.length) || busy) return;
+  if ((!text && !stagedImages.length && !stagedFiles.length) || busy) return;
   busy = true;
   sendBtn.disabled = true;
 
-  let userContent = text;
+  let attachedText = "";
+  if (stagedFiles.length) {
+    attachedText = stagedFiles.map((f) => `[附加文件: ${f.name}]\n\`\`\`${f.lang}\n${f.text}\n\`\`\``).join("\n\n");
+  }
+  const combinedText = [attachedText, text].filter(Boolean).join("\n\n");
+
+  let userContent = combinedText;
   if (stagedImages.length) {
     const parts = [];
-    if (text) parts.push({type: "text", text});
+    if (combinedText) parts.push({type: "text", text: combinedText});
     for (const url of stagedImages) {
       parts.push({type: "image_url", image_url: {url}});
     }
     userContent = parts;
-    stagedImages = [];
-    renderPreview();
   }
+  stagedImages = [];
+  stagedFiles = [];
+  renderPreview();
 
   const userMsgId = "m_" + Date.now();
   const userMsg = {id: userMsgId, parent: currentId, role: "user", content: userContent};
@@ -832,7 +902,7 @@ restore();
 
 fileInput.onchange = () => {
   if (fileInput.files.length) {
-    stageImageFile(fileInput.files[0]);
+    for (const f of fileInput.files) stageFile(f);
     fileInput.value = "";
   }
 };
@@ -843,7 +913,13 @@ input.onpaste = (e) => {
   for (const item of items) {
     if (item.type.startsWith("image/")) {
       e.preventDefault();
-      stageImageFile(item.getAsFile());
+      stageFile(item.getAsFile());
+    } else if (item.kind === "file") {
+      const f = item.getAsFile();
+      if (f) {
+        e.preventDefault();
+        stageFile(f);
+      }
     }
   }
 };
@@ -853,7 +929,16 @@ input.ondrop = (e) => {
   e.preventDefault();
   const files = e.dataTransfer?.files;
   if (files && files.length) {
-    for (const f of files) stageImageFile(f);
+    for (const f of files) stageFile(f);
+  }
+};
+
+document.body.ondragover = (e) => e.preventDefault();
+document.body.ondrop = (e) => {
+  e.preventDefault();
+  const files = e.dataTransfer?.files;
+  if (files && files.length) {
+    for (const f of files) stageFile(f);
   }
 };
 
@@ -862,6 +947,9 @@ newBranchBtn.onclick = () => {
   messages = [];
   currentId = null;
   sessionRecords = [];
+  stagedImages = [];
+  stagedFiles = [];
+  renderPreview();
   chat.textContent = "";
   graphEl.textContent = "";
   renderGraph();

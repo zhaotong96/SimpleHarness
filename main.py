@@ -25,12 +25,22 @@ def store_file(key, name, ext):
     return p
 
 
+# 构造标准库 opener: 显式代理、空串直连(阻断环境变量污染)、None跟随系统
+def make_opener(proxy=None):
+    if proxy:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    if proxy == "":
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener()
+
+
 # 请求指定上游的 /models 列表, 返回完整原始数据
-def fetch_models(s, timeout):
+def fetch_models(s, timeout, proxy=None):
     base = s["host"].rstrip("/")
     hdrs = {"Authorization": f"Bearer {s['api-key']}"} if s.get("api-key") else {}
     req = urllib.request.Request(base + "/models", headers=hdrs)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    opener = make_opener(proxy)
+    with opener.open(req, timeout=timeout) as r:
         return json.loads(r.read().decode())["data"]
 
 
@@ -40,14 +50,15 @@ def upstream(cfg, server_id=None, model_id=None):
     s = next(x for x in cfg["llm-servers"] if x["id"] == sid)
     base = s["host"].rstrip("/")
     hdrs = {"Authorization": f"Bearer {s['api-key']}"} if s.get("api-key") else {}
+    proxy = s.get("proxy") if "proxy" in s else cfg.get("proxy")
     if model_id or s.get("model"):
         model = model_id or s["model"]
         n_ctx = s.get("n-ctx") or cfg.get("default-n-ctx")
     else:
-        m = fetch_models(s, cfg["models-timeout"])[0]
+        m = fetch_models(s, cfg["models-timeout"], proxy)[0]
         model = m["id"]
         n_ctx = m.get("meta", {}).get("n_ctx") or s.get("n-ctx") or cfg.get("default-n-ctx")
-    return base, model, n_ctx, hdrs
+    return base, model, n_ctx, hdrs, proxy
 
 
 # 遍历 skills 目录把 desc 翻成 tool schema; desc 与 run 形参不一致就直接报错
@@ -84,7 +95,7 @@ def do_call(runs, call):
 
 
 # 读上游一条 SSE 流: 实时产出 think/ans 事件, 结束后返回累计的 tool_calls、回答、思考和 usage
-def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout, temp, headers):
+def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout, temp, headers, proxy=None):
     body = {"model": model, "messages": messages, "tools": tools, "temperature": temp, "stream": True,
             "max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": thinking},
             "stream_options": {"include_usage": True}}
@@ -92,7 +103,8 @@ def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout,
     req = urllib.request.Request(base + "/chat/completions", data=json.dumps(body).encode("utf-8"),
                                  headers=req_headers)
     calls, answer, thought, usage = {}, [], [], {}
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    opener = make_opener(proxy)
+    with opener.open(req, timeout=timeout) as r:
         for raw in r:
             line = raw.decode("utf-8").strip()
             if not line.startswith("data:"):
@@ -125,7 +137,7 @@ def stream_upstream(base, model, tools, messages, thinking, max_tokens, timeout,
 # 跑一整轮: 增量持续外抛, 有工具就执行并续问, 结束时把用量和完整 messages 交回客户端
 def round_events(messages, thinking=True, server=None, model=None):
     cfg = read_config()
-    base, model, n_ctx, hdrs = upstream(cfg, server, model)
+    base, model, n_ctx, hdrs, proxy = upstream(cfg, server, model)
     tools, runs = load_skills()
     max_turns = cfg["max-turns"]
     max_tokens = cfg["max-tokens"]
@@ -134,7 +146,7 @@ def round_events(messages, thinking=True, server=None, model=None):
     last = {}
     prev_id = messages[-1].get("id") if messages else None
     for _ in range(max_turns):
-        calls, answer, thought, usage = yield from stream_upstream(base, model, tools, messages, thinking, max_tokens, up_timeout, temp, hdrs)
+        calls, answer, thought, usage = yield from stream_upstream(base, model, tools, messages, thinking, max_tokens, up_timeout, temp, hdrs, proxy)
         last = usage or last
         nid = f"m_{time.time_ns()}"
         asst = {"id": nid, "parent": prev_id, "role": "assistant"}
@@ -312,7 +324,8 @@ class Handler(BaseHTTPRequestHandler):
             if not s:
                 return self.send(404, b'{"error":"no server"}')
             try:
-                models = [m["id"] for m in fetch_models(s, cfg["models-timeout"])]
+                proxy = s.get("proxy") if "proxy" in s else cfg.get("proxy")
+                models = [m["id"] for m in fetch_models(s, cfg["models-timeout"], proxy)]
                 return self.send(200, json.dumps(models, ensure_ascii=False).encode("utf-8"))
             except Exception as e:
                 return self.send(500, json.dumps({"error": str(e)[:120]}).encode("utf-8"))

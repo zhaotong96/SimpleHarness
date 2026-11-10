@@ -9,6 +9,7 @@
     "upstream-timeout": 900,
     "max-output": 5120,
     "wrap": 100,
+    "proxy": "",
     "skills-dir": "skills",
     "conversation-dir": ".agent/conversation",
     "sessions-dir": ".agent/sessions",
@@ -31,13 +32,15 @@
             "id": "llm1",
             "host": "http://127.0.0.1:8080/v1",
             "api-key": "",
-            "model": ""
+            "model": "",
+            "proxy": ""
         },
         {
             "id": "llm2",
             "host": "https://api.openai.com/v1",
             "api-key": "",
-            "model": "deepseek-v4.1-flash-1017"
+            "model": "deepseek-v4.1-flash-1017",
+            "proxy": ""
         }
     ],
     "current-llm": "llm2"
